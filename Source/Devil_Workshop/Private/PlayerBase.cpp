@@ -1,17 +1,43 @@
 #include "PlayerBase.h"
+
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/Widget.h"
 #include "Curves/CurveFloat.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "InputCoreTypes.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/EngineTypes.h"
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
+
+// Cria uma curva com 2 pontos: (0, 0) e (EndTime, EndValue).
+// bSmooth = true  -> interpolação Cubic com tangentes Auto (começa e termina suave)
+// bSmooth = false -> interpolação linear
+static UCurveFloat* MakeDefaultCurve(UObject* Outer, float EndTime, float EndValue, bool bSmooth)
+{
+	UCurveFloat* NewCurve = NewObject<UCurveFloat>(Outer);
+
+	const FKeyHandle StartKey = NewCurve->FloatCurve.AddKey(0.f, 0.f);
+	const FKeyHandle EndKey = NewCurve->FloatCurve.AddKey(EndTime, EndValue);
+
+	if (bSmooth)
+	{
+		NewCurve->FloatCurve.SetKeyInterpMode(StartKey, RCIM_Cubic);
+		NewCurve->FloatCurve.SetKeyInterpMode(EndKey, RCIM_Cubic);
+		NewCurve->FloatCurve.SetKeyTangentMode(StartKey, RCTM_Auto);
+		NewCurve->FloatCurve.SetKeyTangentMode(EndKey, RCTM_Auto);
+		NewCurve->FloatCurve.AutoSetTangents();
+	}
+
+	return NewCurve;
+}
 
 APlayerBase::APlayerBase()
 {
@@ -19,24 +45,36 @@ APlayerBase::APlayerBase()
 
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
+
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(Root);
+	Camera->SetRelativeLocation(FVector::ZeroVector);
+	Camera->SetRelativeRotation(FRotator::ZeroRotator);
+	Camera->FieldOfView = 90.f;
+	Camera->bUsePawnControlRotation = false;
+
 	InspectionAnchor = CreateDefaultSubobject<USceneComponent>(TEXT("InspectionAnchor"));
 	InspectionAnchor->SetupAttachment(Camera);
+	InspectionAnchor->SetRelativeLocation(FVector(80.0, 0.0, 0.0));
+	InspectionAnchor->SetRelativeRotation(FRotator::ZeroRotator);
 }
 
-void APlayerBase::InitTimeline(FTimeline& Timeline, TObjectPtr<UCurveFloat>& Curve, FName UpdateFn, FName FinishedFn)
+void APlayerBase::InitTimeline(FTimeline& Timeline, TObjectPtr<UCurveFloat>& Curve, float Length,
+	float DefaultEndTime, float DefaultEndValue, bool bSmooth, FName UpdateFn, FName FinishedFn)
 {
+	// Sem curva atribuída no BP: cria a curva padrão
 	if (!Curve)
 	{
-		Curve = NewObject<UCurveFloat>(this);
-		Curve->FloatCurve.AddKey(0.f, 0.f);
-		Curve->FloatCurve.AddKey(DefaultTimelineDuration, 1.f);
+		Curve = MakeDefaultCurve(this, DefaultEndTime, DefaultEndValue, bSmooth);
 	}
+
 	FOnTimelineFloat Update;
 	Update.BindUFunction(this, UpdateFn);
 	Timeline.AddInterpFloat(Curve, Update);
-	Timeline.SetTimelineLengthMode(ETimelineLengthMode::TL_LastKeyFrame);
+
+	// Usa o Length exato da timeline (igual ao BP), e não o último ponto da curva
+	Timeline.SetTimelineLengthMode(ETimelineLengthMode::TL_TimelineLength);
+	Timeline.SetTimelineLength(Length);
 
 	if (FinishedFn != NAME_None)
 	{
@@ -53,17 +91,29 @@ void APlayerBase::BeginPlay()
 	DefaultCameraRelativeLocation = Camera->GetRelativeLocation();
 	DefaultCameraRelativeRotation = Camera->GetRelativeRotation();
 
-	InitTimeline(MoveTimeline, MoveCurve, "OnMoveUpdate", "OnMoveFinished");
-	InitTimeline(CameraFocusTimeline, CameraFocusCurve, "OnCameraFocusUpdate", NAME_None);
-	InitTimeline(InspectTimeline, InspectCurve, "OnInspectUpdate", "OnInspectFinished");
+	// Move:        (0,0) -> (0.57, 1.03), suave, length 0.65
+	InitTimeline(MoveTimeline, MoveCurve, MoveLength, 0.57f, 1.03f, true, "OnMoveUpdate", "OnMoveFinished");
+	// CameraFocus: (0,0) -> (0.35, 1),    linear, length 0.35
+	InitTimeline(CameraFocusTimeline, CameraFocusCurve, CameraFocusLength, 0.35f, 1.0f, false, "OnCameraFocusUpdate", NAME_None);
+	// Inspect:     (0,0) -> (0.5, 1),     suave,  length 0.5
+	InitTimeline(InspectTimeline, InspectCurve, InspectLength, 0.5f, 1.0f, true, "OnInspectUpdate", "OnInspectFinished");
 
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		CachedPlayerController = PC;
+
 		if (auto* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
 		{
-			Subsystem->AddMappingContext(DefaultMappingContext, 0);
+			if (DefaultMappingContext)
+			{
+				Subsystem->AddMappingContext(DefaultMappingContext, 0);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("PlayerBase: DefaultMappingContext não foi atribuído no Class Defaults."));
+			}
 		}
+
 		PC->bShowMouseCursor = true;
 		UWidgetBlueprintLibrary::SetInputMode_GameOnly(PC, false);
 		UGameplayStatics::SetGamePaused(this, false);
@@ -73,13 +123,25 @@ void APlayerBase::BeginPlay()
 void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
-	if (auto* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent))
+
+	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent);
+	if (!EIC)
 	{
-		EIC->BindAction(ClickAction, ETriggerEvent::Started, this, &APlayerBase::OnClick);
-		EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack);
-		EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &APlayerBase::OnLook);
-		EIC->BindAction(PauseAction, ETriggerEvent::Started, this, &APlayerBase::OnPause);
+		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: o Input Component não é um EnhancedInputComponent (Project Settings > Input > Default Classes)."));
+		return;
 	}
+
+	if (ClickAction) { EIC->BindAction(ClickAction, ETriggerEvent::Started, this, &APlayerBase::OnClick); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: ClickAction não atribuída.")); }
+
+	if (GoBackAction) { EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: GoBackAction não atribuída.")); }
+
+	if (LookAction) { EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &APlayerBase::OnLook); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: LookAction não atribuída.")); }
+
+	if (PauseAction) { EIC->BindAction(PauseAction, ETriggerEvent::Started, this, &APlayerBase::OnPause); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseAction não atribuída.")); }
 }
 
 // ===================== TICK =====================
@@ -93,29 +155,47 @@ void APlayerBase::Tick(float DeltaTime)
 
 	if (!CachedPlayerController) return;
 
-	if (!IsTransitioning && !bIsInspecting)
+	if (!IsTransitioning && !isInspecting)
 	{
-		// Look pelas bordas da tela
-		float MouseX, MouseY; int32 SizeX, SizeY;
-		CachedPlayerController->GetMousePosition(MouseX, MouseY);
+		// Olhar pelas bordas da tela
+		float MouseX = 0.f;
+		float MouseY = 0.f;
+		int32 SizeX = 0;
+		int32 SizeY = 0;
+
+		if (!CachedPlayerController->GetMousePosition(MouseX, MouseY)) return;
 		CachedPlayerController->GetViewportSize(SizeX, SizeY);
 
-		if (MouseX < EdgeLookMargin)               ApplyLookDelta(-EdgeLookSpeed * DeltaTime);
-		else if (MouseX > SizeX - EdgeLookMargin)  ApplyLookDelta(EdgeLookSpeed * DeltaTime);
+		if (MouseX < EdgeLookMargin)
+		{
+			ApplyLookDelta(EdgeLookSpeed * -1.0 * DeltaTime);
+		}
+		else if (MouseX > SizeX - EdgeLookMargin)
+		{
+			ApplyLookDelta(EdgeLookSpeed * DeltaTime);
+		}
 
-		if (MouseY < EdgeLookMargin)               ApplyLookPitchDelta(DeltaTime * EdgeLookSpeed);
-		else if (MouseY > SizeY - EdgeLookMargin)  ApplyLookPitchDelta(-DeltaTime * EdgeLookSpeed);
+		if (MouseY < EdgeLookMargin)
+		{
+			ApplyLookPitchDelta(DeltaTime * EdgeLookSpeed);
+		}
+		else if (MouseY > SizeY - EdgeLookMargin)
+		{
+			ApplyLookPitchDelta(DeltaTime * EdgeLookSpeed * -1.0);
+		}
 	}
-	else if (bIsInspecting && !IsTransitioning &&
+	else if (isInspecting && !IsTransitioning &&
 		CachedPlayerController->IsInputKeyDown(EKeys::LeftMouseButton))
 	{
-		// Rotacionar o objeto inspecionado com o mouse
-		float DX, DY;
+		// Girar o objeto inspecionado com o mouse
+		float DX = 0.f;
+		float DY = 0.f;
 		CachedPlayerController->GetInputMouseDelta(DX, DY);
+
 		if (InspectedObject)
 		{
 			InspectedObject->AddActorWorldRotation(
-				UKismetMathLibrary::RotatorFromAxisAndAngle(Camera->GetUpVector(), -DX * InspectRotateSpeed));
+				UKismetMathLibrary::RotatorFromAxisAndAngle(Camera->GetUpVector(), DX * InspectRotateSpeed * -1.0));
 			InspectedObject->AddActorWorldRotation(
 				UKismetMathLibrary::RotatorFromAxisAndAngle(Camera->GetRightVector(), DY * InspectRotateSpeed));
 		}
@@ -125,33 +205,35 @@ void APlayerBase::Tick(float DeltaTime)
 // ===================== LOOK =====================
 void APlayerBase::UpdateCameraRotation()
 {
+	// Pitch = LookPitchOffset, Yaw = LookYawOffset, Roll = 0 (igual ao K2_SetRelativeRotation do BP)
 	Camera->SetRelativeRotation(FRotator(LookPitchOffset, LookYawOffset, 0.0));
 }
 
-// ATENÇÃO: reconstruí estas duas funções por dedução (não estavam no grafo que você enviou).
 void APlayerBase::ApplyLookDelta(double Delta)
 {
-	LookYawOffset = FMath::Clamp(LookYawOffset + Delta, -30.0, 30.0);
+	LookYawOffset = FMath::Clamp(LookYawOffset + Delta, -YawLimit, YawLimit);
 	UpdateCameraRotation();
 }
+
 void APlayerBase::ApplyLookPitchDelta(double Delta)
 {
-	LookPitchOffset = FMath::Clamp(LookPitchOffset + Delta, -30.0, 30.0);
+	LookPitchOffset = FMath::Clamp(LookPitchOffset + Delta, PitchMin, PitchMax);
 	UpdateCameraRotation();
 }
 
 void APlayerBase::OnLook(const FInputActionValue& Value)
 {
-	if (bIsInspecting || IsTransitioning) return;
+	if (isInspecting || IsTransitioning) return;
+
 	const double Dt = GetWorld()->GetDeltaSeconds();
-	LookYawOffset = FMath::Clamp(LookYawOffset + Value.Get<float>() * Dt * 60.0, -30.0, 30.0);
+	LookYawOffset = FMath::Clamp(LookYawOffset + static_cast<double>(Value.Get<float>()) * Dt * 60.0, -YawLimit, YawLimit);
 	UpdateCameraRotation();
 }
 
 // ===================== CLICK =====================
 void APlayerBase::OnClick()
 {
-	if (bIsInspecting || !CachedPlayerController) return;
+	if (isInspecting || !CachedPlayerController) return;
 
 	FHitResult Hit;
 	const bool bHit = CachedPlayerController->GetHitResultUnderCursorByChannel(
@@ -177,12 +259,15 @@ void APlayerBase::OnClick()
 	}
 	else if (HitActor && HitActor->ActorHasTag("CameraFocus"))
 	{
-		// Mesma lógica do grafo (ver observação sobre este ramo abaixo)
+		// Mantido igual ao grafo original: este ramo só roda quando o trace NÃO acerta nada,
+		// então HitActor é nulo e ele nunca dispara (o mesmo acontece no Blueprint).
 		FocusStartLocation = Camera->GetRelativeLocation();
 		FocusStartRotation = Camera->GetRelativeRotation();
+
 		const FTransform Rel = HitActor->GetActorTransform().GetRelativeTransform(GetActorTransform());
 		FocusTargetLocation = Rel.GetLocation();
 		FocusTargetRotation = Rel.Rotator();
+
 		bIsCameraFocused = true;
 		CameraFocusTimeline.PlayFromStart();
 	}
@@ -222,12 +307,15 @@ void APlayerBase::OnMoveUpdate(float Alpha)
 		FMath::Lerp(StartLocation, TargetLocation, Alpha),
 		UKismetMathLibrary::RLerp(StartRotation, TargetRotation, Alpha, false));
 
-	// Head bob (mesmo cálculo do grafo)
-	const double Z = FMath::Sin(Alpha * BobFrequency * PI) * BobAmplitude;
+	// Head bob: Z = Sin(Alpha * BobFrequency * Pi) * BobAmplitude (igual ao grafo)
+	const double Z = FMath::Sin(Alpha * BobFrequency * UE_DOUBLE_PI) * BobAmplitude;
 	Camera->SetRelativeLocation(FVector(0.0, 0.0, Z));
 }
 
-void APlayerBase::OnMoveFinished() { IsTransitioning = false; }
+void APlayerBase::OnMoveFinished()
+{
+	IsTransitioning = false;
+}
 
 void APlayerBase::OnCameraFocusUpdate(float Alpha)
 {
@@ -240,12 +328,15 @@ void APlayerBase::OnCameraFocusUpdate(float Alpha)
 void APlayerBase::StartInspection(AActor* TargetObject)
 {
 	if (!TargetObject) return;
+
 	InspectedObject = TargetObject;
-	bIsInspecting = true;
+	isInspecting = true;
 	IsTransitioning = true;
+
 	InspectStartLocation = TargetObject->GetActorLocation();
 	InspectStartRotation = TargetObject->GetActorRotation();
 	TargetObject->SetActorEnableCollision(false);
+
 	InspectTimeline.PlayFromStart();
 }
 
@@ -258,16 +349,28 @@ void APlayerBase::OnInspectUpdate(float Alpha)
 	}
 }
 
-void APlayerBase::OnInspectFinished() { IsTransitioning = false; }
+void APlayerBase::OnInspectFinished()
+{
+	IsTransitioning = false;
+}
 
 // ===================== PAUSE =====================
 void APlayerBase::OnPause()
 {
 	if (!CachedPlayerController) return;
-	if (UUserWidget* W = CreateWidget<UUserWidget>(CachedPlayerController, PauseMenuClass))
+
+	if (PauseMenuClass)
 	{
-		W->AddToViewport();
+		if (UUserWidget* Widget = CreateWidget<UUserWidget>(CachedPlayerController, PauseMenuClass))
+		{
+			Widget->AddToViewport();
+		}
 	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseMenuClass não foi atribuída no Class Defaults."));
+	}
+
 	CachedPlayerController->bShowMouseCursor = true;
 	UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(CachedPlayerController, nullptr, EMouseLockMode::DoNotLock, false);
 	UGameplayStatics::SetGamePaused(this, true);
