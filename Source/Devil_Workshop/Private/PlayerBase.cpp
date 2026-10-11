@@ -2,7 +2,9 @@
 
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/Widget.h"
+#include "CollisionQueryParams.h"
 #include "Curves/CurveFloat.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -12,14 +14,12 @@
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/EngineTypes.h"
+#include "Engine/Scene.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
 
-// Cria uma curva com 2 pontos: (0, 0) e (EndTime, EndValue).
-// bSmooth = true  -> interpolação Cubic com tangentes Auto (começa e termina suave)
-// bSmooth = false -> interpolação linear
 static UCurveFloat* MakeDefaultCurve(UObject* Outer, float EndTime, float EndValue, bool bSmooth)
 {
 	UCurveFloat* NewCurve = NewObject<UCurveFloat>(Outer);
@@ -55,14 +55,13 @@ APlayerBase::APlayerBase()
 
 	InspectionAnchor = CreateDefaultSubobject<USceneComponent>(TEXT("InspectionAnchor"));
 	InspectionAnchor->SetupAttachment(Camera);
-	InspectionAnchor->SetRelativeLocation(FVector(80.0, 0.0, 0.0));
+	InspectionAnchor->SetRelativeLocation(FVector(120.0, 0.0, 0.0));
 	InspectionAnchor->SetRelativeRotation(FRotator::ZeroRotator);
 }
 
 void APlayerBase::InitTimeline(FTimeline& Timeline, TObjectPtr<UCurveFloat>& Curve, float Length,
 	float DefaultEndTime, float DefaultEndValue, bool bSmooth, FName UpdateFn, FName FinishedFn)
 {
-	// Sem curva atribuída no BP: cria a curva padrão
 	if (!Curve)
 	{
 		Curve = MakeDefaultCurve(this, DefaultEndTime, DefaultEndValue, bSmooth);
@@ -72,7 +71,6 @@ void APlayerBase::InitTimeline(FTimeline& Timeline, TObjectPtr<UCurveFloat>& Cur
 	Update.BindUFunction(this, UpdateFn);
 	Timeline.AddInterpFloat(Curve, Update);
 
-	// Usa o Length exato da timeline (igual ao BP), e não o último ponto da curva
 	Timeline.SetTimelineLengthMode(ETimelineLengthMode::TL_TimelineLength);
 	Timeline.SetTimelineLength(Length);
 
@@ -91,11 +89,11 @@ void APlayerBase::BeginPlay()
 	DefaultCameraRelativeLocation = Camera->GetRelativeLocation();
 	DefaultCameraRelativeRotation = Camera->GetRelativeRotation();
 
-	// Move:        (0,0) -> (0.57, 1.03), suave, length 0.65
+	InspectionAnchor->SetRelativeLocation(FVector(InspectionDistance, 0.0, 0.0));
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: versao com clique via Enhanced Input na inspecao carregada (margem de borda = %.0f px, blur FStop = %.2f)"), EdgeLookMargin, InspectionBlurFStop);
+
 	InitTimeline(MoveTimeline, MoveCurve, MoveLength, 0.57f, 1.03f, true, "OnMoveUpdate", "OnMoveFinished");
-	// CameraFocus: (0,0) -> (0.35, 1),    linear, length 0.35
-	InitTimeline(CameraFocusTimeline, CameraFocusCurve, CameraFocusLength, 0.35f, 1.0f, false, "OnCameraFocusUpdate", NAME_None);
-	// Inspect:     (0,0) -> (0.5, 1),     suave,  length 0.5
+	InitTimeline(CameraFocusTimeline, CameraFocusCurve, CameraFocusLength, 0.35f, 1.0f, false, "OnCameraFocusUpdate", "OnCameraFocusFinished");
 	InitTimeline(InspectTimeline, InspectCurve, InspectLength, 0.5f, 1.0f, true, "OnInspectUpdate", "OnInspectFinished");
 
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
@@ -115,7 +113,7 @@ void APlayerBase::BeginPlay()
 		}
 
 		PC->bShowMouseCursor = true;
-		UWidgetBlueprintLibrary::SetInputMode_GameOnly(PC, false);
+		UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(PC, nullptr, EMouseLockMode::LockAlways, false);
 		UGameplayStatics::SetGamePaused(this, false);
 	}
 }
@@ -131,7 +129,12 @@ void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponen
 		return;
 	}
 
-	if (ClickAction) { EIC->BindAction(ClickAction, ETriggerEvent::Started, this, &APlayerBase::OnClick); }
+	if (ClickAction)
+	{
+		EIC->BindAction(ClickAction, ETriggerEvent::Started, this, &APlayerBase::OnClick);
+		EIC->BindAction(ClickAction, ETriggerEvent::Completed, this, &APlayerBase::OnClickReleased);
+		EIC->BindAction(ClickAction, ETriggerEvent::Canceled, this, &APlayerBase::OnClickReleased);
+	}
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: ClickAction não atribuída.")); }
 
 	if (GoBackAction) { EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack); }
@@ -144,7 +147,6 @@ void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponen
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseAction não atribuída.")); }
 }
 
-// ===================== TICK =====================
 void APlayerBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -155,9 +157,8 @@ void APlayerBase::Tick(float DeltaTime)
 
 	if (!CachedPlayerController) return;
 
-	if (!IsTransitioning && !isInspecting)
+	if (!IsTransitioning && !isInspecting && !bIsCameraFocused)
 	{
-		// Olhar pelas bordas da tela
 		float MouseX = 0.f;
 		float MouseY = 0.f;
 		int32 SizeX = 0;
@@ -184,28 +185,18 @@ void APlayerBase::Tick(float DeltaTime)
 			ApplyLookPitchDelta(DeltaTime * EdgeLookSpeed * -1.0);
 		}
 	}
-	else if (isInspecting && !IsTransitioning &&
-		CachedPlayerController->IsInputKeyDown(EKeys::LeftMouseButton))
+	else if (isInspecting)
 	{
-		// Girar o objeto inspecionado com o mouse
-		float DX = 0.f;
-		float DY = 0.f;
-		CachedPlayerController->GetInputMouseDelta(DX, DY);
-
-		if (InspectedObject)
-		{
-			InspectedObject->AddActorWorldRotation(
-				UKismetMathLibrary::RotatorFromAxisAndAngle(Camera->GetUpVector(), DX * InspectRotateSpeed * -1.0));
-			InspectedObject->AddActorWorldRotation(
-				UKismetMathLibrary::RotatorFromAxisAndAngle(Camera->GetRightVector(), DY * InspectRotateSpeed));
-		}
+		UpdateInspectionRotation();
+	}
+	else
+	{
+		bInspectDragging = false;
 	}
 }
 
-// ===================== LOOK =====================
 void APlayerBase::UpdateCameraRotation()
 {
-	// Pitch = LookPitchOffset, Yaw = LookYawOffset, Roll = 0 (igual ao K2_SetRelativeRotation do BP)
 	Camera->SetRelativeRotation(FRotator(LookPitchOffset, LookYawOffset, 0.0));
 }
 
@@ -223,60 +214,144 @@ void APlayerBase::ApplyLookPitchDelta(double Delta)
 
 void APlayerBase::OnLook(const FInputActionValue& Value)
 {
-	if (isInspecting || IsTransitioning) return;
+	if (isInspecting || IsTransitioning || bIsCameraFocused) return;
 
 	const double Dt = GetWorld()->GetDeltaSeconds();
 	LookYawOffset = FMath::Clamp(LookYawOffset + static_cast<double>(Value.Get<float>()) * Dt * 60.0, -YawLimit, YawLimit);
 	UpdateCameraRotation();
 }
 
-// ===================== CLICK =====================
+bool APlayerBase::IsMouseNearScreenEdge()
+{
+	if (!CachedPlayerController) return false;
+
+	float MouseX = 0.f;
+	float MouseY = 0.f;
+	int32 SizeX = 0;
+	int32 SizeY = 0;
+
+	if (!CachedPlayerController->GetMousePosition(MouseX, MouseY)) return false;
+	CachedPlayerController->GetViewportSize(SizeX, SizeY);
+	if (SizeX <= 0 || SizeY <= 0) return false;
+
+	return MouseX < EdgeLookMargin || MouseX > SizeX - EdgeLookMargin
+		|| MouseY < EdgeLookMargin || MouseY > SizeY - EdgeLookMargin;
+}
+
 void APlayerBase::OnClick()
 {
-	if (isInspecting || !CachedPlayerController) return;
+	bClickHeld = true;
 
-	FHitResult Hit;
-	const bool bHit = CachedPlayerController->GetHitResultUnderCursorByChannel(
-		UEngineTypes::ConvertToTraceType(ECC_Visibility), true, Hit);
+	UE_LOG(LogTemp, Warning, TEXT("OnClick chamado | isInspecting = %d | IsTransitioning = %d"), isInspecting ? 1 : 0, IsTransitioning ? 1 : 0);
 
-	AActor* HitActor = Hit.GetActor();
+	if (!CachedPlayerController) return;
 
-	if (bHit)
+	if (isInspecting)
 	{
-		if (HitActor && HitActor->ActorHasTag("Inspectable"))
+		if (!IsTransitioning)
 		{
-			StartInspection(HitActor);
-		}
-		else if (HitActor && HitActor->ActorHasTag("Clickable"))
-		{
-			if (HitActor != CurrentAreaActor)
+			const bool bNearEdge = IsMouseNearScreenEdge();
+
+			float ClickX = 0.f;
+			float ClickY = 0.f;
+			int32 ViewX = 0;
+			int32 ViewY = 0;
+			CachedPlayerController->GetMousePosition(ClickX, ClickY);
+			CachedPlayerController->GetViewportSize(ViewX, ViewY);
+			UE_LOG(LogTemp, Warning, TEXT("Inspecao: clique em (%.0f, %.0f) | viewport = (%d, %d) | perto da borda = %d"), ClickX, ClickY, ViewX, ViewY, bNearEdge ? 1 : 0);
+
+			if (bNearEdge)
 			{
-				CurrentAreaActor = HitActor;
-				PositionHistory.Add(GetActorTransform());
-				MoveToPosition(HitActor->GetActorTransform());
+				ExitInspection();
 			}
 		}
+		return;
 	}
-	else if (HitActor && HitActor->ActorHasTag("CameraFocus"))
+
+	FVector WorldOrigin;
+	FVector WorldDirection;
+	if (!CachedPlayerController->DeprojectMousePositionToWorld(WorldOrigin, WorldDirection))
 	{
-		// Mantido igual ao grafo original: este ramo só roda quando o trace NÃO acerta nada,
-		// então HitActor é nulo e ele nunca dispara (o mesmo acontece no Blueprint).
-		FocusStartLocation = Camera->GetRelativeLocation();
-		FocusStartRotation = Camera->GetRelativeRotation();
+		UE_LOG(LogTemp, Warning, TEXT("Click: falhou o Deproject do mouse"));
+		return;
+	}
 
-		const FTransform Rel = HitActor->GetActorTransform().GetRelativeTransform(GetActorTransform());
-		FocusTargetLocation = Rel.GetLocation();
-		FocusTargetRotation = Rel.Rotator();
+	const FVector TraceEnd = WorldOrigin + WorldDirection * 100000.0;
 
-		bIsCameraFocused = true;
-		CameraFocusTimeline.PlayFromStart();
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerClickTrace), true);
+	Params.AddIgnoredActor(this);
+
+	AActor* FallbackClickable = nullptr;
+
+	for (int32 i = 0; i < 8; ++i)
+	{
+		FHitResult Hit;
+		if (!GetWorld()->LineTraceSingleByChannel(Hit, WorldOrigin, TraceEnd, ECC_Visibility, Params))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Click: trace %d não acertou nada"), i);
+			break;
+		}
+
+		AActor* HitActor = Hit.GetActor();
+		if (!HitActor) break;
+
+		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
+
+		if (HitActor->ActorHasTag("Inspectable"))
+		{
+			StartInspection(HitActor);
+			return;
+		}
+		if (HitActor->ActorHasTag("CameraFocus"))
+		{
+			StartCameraFocus(HitActor);
+			return;
+		}
+		if (HitActor->ActorHasTag("Clickable"))
+		{
+			if (!FallbackClickable) FallbackClickable = HitActor;
+			Params.AddIgnoredActor(HitActor);
+			continue;
+		}
+
+		break;
+	}
+
+	if (FallbackClickable && FallbackClickable != CurrentAreaActor)
+	{
+		CurrentAreaActor = FallbackClickable;
+		PositionHistory.Add(GetActorTransform());
+		MoveToPosition(FallbackClickable->GetActorTransform());
 	}
 }
 
-// ===================== GO BACK =====================
+void APlayerBase::OnClickReleased()
+{
+	UE_LOG(LogTemp, Warning, TEXT("Click solto"));
+
+	bClickHeld = false;
+	bInspectDragging = false;
+}
+
 void APlayerBase::OnGoBack()
 {
-	if (IsTransitioning || PositionHistory.Num() <= 0) return;
+	UE_LOG(LogTemp, Warning, TEXT("OnGoBack chamado | isInspecting = %d | IsTransitioning = %d"), isInspecting ? 1 : 0, IsTransitioning ? 1 : 0);
+
+	if (IsTransitioning) return;
+
+	if (isInspecting)
+	{
+		ExitInspection();
+		return;
+	}
+
+	if (bIsCameraFocused)
+	{
+		ExitCameraFocus();
+		return;
+	}
+
+	if (PositionHistory.Num() <= 0) return;
 
 	const FTransform Last = PositionHistory.Last();
 	PositionHistory.RemoveAt(PositionHistory.Num() - 1);
@@ -284,9 +359,12 @@ void APlayerBase::OnGoBack()
 	MoveToPosition(Last);
 }
 
-// ===================== MOVE =====================
 void APlayerBase::MoveToPosition(const FTransform& Target)
 {
+	CameraFocusTimeline.Stop();
+	bIsCameraFocused = false;
+	bExitingCameraFocus = false;
+
 	LookPitchOffset = 0.0;
 	LookYawOffset = 0.0;
 	Camera->SetRelativeLocation(DefaultCameraRelativeLocation);
@@ -303,18 +381,50 @@ void APlayerBase::MoveToPosition(const FTransform& Target)
 
 void APlayerBase::OnMoveUpdate(float Alpha)
 {
-	SetActorLocationAndRotation(
-		FMath::Lerp(StartLocation, TargetLocation, Alpha),
-		UKismetMathLibrary::RLerp(StartRotation, TargetRotation, Alpha, false));
+	const float ClampedAlpha = FMath::Clamp(Alpha, 0.f, 1.f);
 
-	// Head bob: Z = Sin(Alpha * BobFrequency * Pi) * BobAmplitude (igual ao grafo)
-	const double Z = FMath::Sin(Alpha * BobFrequency * UE_DOUBLE_PI) * BobAmplitude;
-	Camera->SetRelativeLocation(FVector(0.0, 0.0, Z));
+	SetActorLocationAndRotation(
+		FMath::Lerp(StartLocation, TargetLocation, ClampedAlpha),
+		UKismetMathLibrary::RLerp(StartRotation, TargetRotation, ClampedAlpha, false));
+
+	const double Z = FMath::Sin(ClampedAlpha * BobFrequency * UE_DOUBLE_PI) * BobAmplitude;
+	Camera->SetRelativeLocation(DefaultCameraRelativeLocation + FVector(0.0, 0.0, Z));
 }
 
 void APlayerBase::OnMoveFinished()
 {
+	SetActorLocationAndRotation(TargetLocation, TargetRotation);
+	Camera->SetRelativeLocation(DefaultCameraRelativeLocation);
+
 	IsTransitioning = false;
+}
+
+void APlayerBase::StartCameraFocus(AActor* FocusActor)
+{
+	if (!FocusActor || bIsCameraFocused) return;
+
+	FocusStartLocation = Camera->GetRelativeLocation();
+	FocusStartRotation = Camera->GetRelativeRotation();
+
+	const FTransform Rel = FocusActor->GetActorTransform().GetRelativeTransform(GetActorTransform());
+	FocusTargetLocation = Rel.GetLocation();
+	FocusTargetRotation = Rel.Rotator();
+
+	bIsCameraFocused = true;
+	bExitingCameraFocus = false;
+	IsTransitioning = true;
+
+	CameraFocusTimeline.PlayFromStart();
+}
+
+void APlayerBase::ExitCameraFocus()
+{
+	if (!bIsCameraFocused || IsTransitioning) return;
+
+	bExitingCameraFocus = true;
+	IsTransitioning = true;
+
+	CameraFocusTimeline.ReverseFromEnd();
 }
 
 void APlayerBase::OnCameraFocusUpdate(float Alpha)
@@ -324,37 +434,226 @@ void APlayerBase::OnCameraFocusUpdate(float Alpha)
 		UKismetMathLibrary::RLerp(FocusStartRotation, FocusTargetRotation, Alpha, true));
 }
 
-// ===================== INSPEÇÃO =====================
+void APlayerBase::OnCameraFocusFinished()
+{
+	IsTransitioning = false;
+
+	if (bExitingCameraFocus)
+	{
+		bExitingCameraFocus = false;
+		bIsCameraFocused = false;
+	}
+}
+
 void APlayerBase::StartInspection(AActor* TargetObject)
 {
-	if (!TargetObject) return;
+	if (!TargetObject || isInspecting) return;
+
+	if (const USceneComponent* TargetRoot = TargetObject->GetRootComponent())
+	{
+		if (TargetRoot->Mobility != EComponentMobility::Movable)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("PlayerBase: '%s' é Inspectable mas não está como Movable. Mude a Mobility para Movable no Details."),
+				*TargetObject->GetName());
+		}
+	}
 
 	InspectedObject = TargetObject;
 	isInspecting = true;
 	IsTransitioning = true;
+	bExitingInspection = false;
+	bInspectDragging = false;
+	UE_LOG(LogTemp, Warning, TEXT("Inspecao iniciada: '%s' | blur = %d | FStop = %.2f | distancia = %.0f"), *TargetObject->GetName(), bBlurBackground ? 1 : 0, InspectionBlurFStop, InspectionDistance);
 
 	InspectStartLocation = TargetObject->GetActorLocation();
 	InspectStartRotation = TargetObject->GetActorRotation();
+	InspectStartScale = TargetObject->GetActorScale3D();
+
+	FVector BoundsOrigin = FVector::ZeroVector;
+	FVector BoundsExtent = FVector::ZeroVector;
+	TargetObject->GetActorBounds(false, BoundsOrigin, BoundsExtent);
+
+	InspectStartCenter = BoundsOrigin;
+	InspectLocalCenterOffset = TargetObject->GetActorQuat().UnrotateVector(BoundsOrigin - InspectStartLocation);
+
+	InspectScaleRatio = 1.0;
+	if (bAutoFitInspectedObject)
+	{
+		const double MaxSize = FMath::Max3(BoundsExtent.X, BoundsExtent.Y, BoundsExtent.Z) * 2.0;
+		if (MaxSize > KINDA_SMALL_NUMBER)
+		{
+			InspectScaleRatio = InspectionTargetSize / MaxSize;
+		}
+	}
+
+	bInspectedObjectHadCollision = TargetObject->GetActorEnableCollision();
 	TargetObject->SetActorEnableCollision(false);
+
+	InspectedShadowStates.Reset();
+	if (bDisableShadowDuringInspection)
+	{
+		TArray<UPrimitiveComponent*> Primitives;
+		TargetObject->GetComponents<UPrimitiveComponent>(Primitives);
+
+		for (UPrimitiveComponent* Primitive : Primitives)
+		{
+			InspectedShadowStates.Add(Primitive, Primitive->CastShadow);
+			Primitive->SetCastShadow(false);
+		}
+	}
 
 	InspectTimeline.PlayFromStart();
 }
 
+void APlayerBase::ExitInspection()
+{
+	if (!isInspecting || IsTransitioning) return;
+
+	if (!InspectedObject)
+	{
+		isInspecting = false;
+		ClearInspectionBlur();
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("ExitInspection chamado"));
+
+	InspectExitRotation = InspectedObject->GetActorRotation();
+	bExitingInspection = true;
+	bInspectDragging = false;
+	IsTransitioning = true;
+
+	InspectTimeline.ReverseFromEnd();
+}
+
+void APlayerBase::PlaceInspectedObject(const FVector& CenterWorld, double ScaleRatio)
+{
+	if (!InspectedObject) return;
+
+	InspectedObject->SetActorScale3D(InspectStartScale * ScaleRatio);
+
+	const FQuat Q = InspectedObject->GetActorQuat();
+	InspectedObject->SetActorLocation(CenterWorld - Q.RotateVector(InspectLocalCenterOffset * ScaleRatio));
+}
+
+void APlayerBase::UpdateInspectionRotation()
+{
+	const bool bHolding = !IsTransitioning && InspectedObject && bClickHeld;
+
+	if (!bHolding)
+	{
+		bInspectDragging = false;
+		return;
+	}
+
+	float MouseX = 0.f;
+	float MouseY = 0.f;
+	if (!CachedPlayerController->GetMousePosition(MouseX, MouseY))
+	{
+		bInspectDragging = false;
+		return;
+	}
+
+	const FVector2D Current(MouseX, MouseY);
+
+	if (bInspectDragging)
+	{
+		const FVector2D Delta = Current - LastInspectMousePos;
+
+		const double DX = Delta.X;
+		const double DY = -Delta.Y;
+
+		const FQuat YawQuat(Camera->GetUpVector(), FMath::DegreesToRadians(DX * InspectRotateSpeed * -1.0));
+		const FQuat PitchQuat(Camera->GetRightVector(), FMath::DegreesToRadians(DY * InspectRotateSpeed));
+
+		InspectedObject->SetActorRotation(PitchQuat * YawQuat * InspectedObject->GetActorQuat());
+		PlaceInspectedObject(InspectionAnchor->GetComponentLocation(), InspectScaleRatio);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Inspecao: arraste comecou em (%.0f, %.0f)"), MouseX, MouseY);
+	}
+
+	LastInspectMousePos = Current;
+	bInspectDragging = true;
+}
+
 void APlayerBase::OnInspectUpdate(float Alpha)
 {
-	if (InspectedObject)
+	if (!InspectedObject) return;
+
+	if (bExitingInspection)
 	{
-		InspectedObject->SetActorLocation(
-			FMath::Lerp(InspectStartLocation, InspectionAnchor->GetComponentLocation(), Alpha));
+		InspectedObject->SetActorRotation(
+			UKismetMathLibrary::RLerp(InspectStartRotation, InspectExitRotation, Alpha, true));
 	}
+
+	const double Ratio = FMath::Lerp(1.0, InspectScaleRatio, static_cast<double>(Alpha));
+	const FVector Center = FMath::Lerp(InspectStartCenter, InspectionAnchor->GetComponentLocation(), Alpha);
+	PlaceInspectedObject(Center, Ratio);
+
+	UpdateInspectionBlur(Alpha);
 }
 
 void APlayerBase::OnInspectFinished()
 {
+	UE_LOG(LogTemp, Warning, TEXT("OnInspectFinished | saindo = %d"), bExitingInspection ? 1 : 0);
 	IsTransitioning = false;
+
+	if (bExitingInspection)
+	{
+		bExitingInspection = false;
+
+		if (InspectedObject)
+		{
+			InspectedObject->SetActorScale3D(InspectStartScale);
+			InspectedObject->SetActorLocationAndRotation(InspectStartLocation, InspectStartRotation);
+			InspectedObject->SetActorEnableCollision(bInspectedObjectHadCollision);
+		}
+
+		for (const TPair<TWeakObjectPtr<UPrimitiveComponent>, bool>& Entry : InspectedShadowStates)
+		{
+			if (UPrimitiveComponent* Primitive = Entry.Key.Get())
+			{
+				Primitive->SetCastShadow(Entry.Value);
+			}
+		}
+		InspectedShadowStates.Reset();
+
+		InspectedObject = nullptr;
+		isInspecting = false;
+		bInspectDragging = false;
+
+		ClearInspectionBlur();
+	}
 }
 
-// ===================== PAUSE =====================
+void APlayerBase::UpdateInspectionBlur(float Alpha)
+{
+	if (!bBlurBackground || !Camera) return;
+
+	FPostProcessSettings& PP = Camera->PostProcessSettings;
+	PP.bOverride_DepthOfFieldFocalDistance = true;
+	PP.bOverride_DepthOfFieldFstop = true;
+
+	PP.DepthOfFieldFocalDistance = static_cast<float>(InspectionDistance);
+
+	const float InvFStop = FMath::Lerp(1.f / 32.f, 1.f / FMath::Max(InspectionBlurFStop, 0.05f), Alpha);
+	PP.DepthOfFieldFstop = 1.f / InvFStop;
+
+	Camera->PostProcessBlendWeight = 1.f;
+}
+
+void APlayerBase::ClearInspectionBlur()
+{
+	if (!Camera) return;
+
+	FPostProcessSettings& PP = Camera->PostProcessSettings;
+	PP.bOverride_DepthOfFieldFocalDistance = false;
+	PP.bOverride_DepthOfFieldFstop = false;
+}
+
 void APlayerBase::OnPause()
 {
 	if (!CachedPlayerController) return;

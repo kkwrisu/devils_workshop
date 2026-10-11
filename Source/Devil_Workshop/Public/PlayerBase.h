@@ -7,6 +7,7 @@
 
 class UCameraComponent;
 class USceneComponent;
+class UPrimitiveComponent;
 class UInputMappingContext;
 class UInputAction;
 class UCurveFloat;
@@ -24,22 +25,27 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 
-	// Equivalente ao Custom Event "MoveToPosition" do BP
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void MoveToPosition(const FTransform& Target);
 
-	// Equivalente ao Custom Event "StartInspection" do BP
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void StartInspection(AActor* TargetObject);
 
-	// Equivalentes às funções "ApplyLookDelta" e "ApplyLookPitchDelta" do BP
+	UFUNCTION(BlueprintCallable, Category = "Player")
+	void ExitInspection();
+
+	UFUNCTION(BlueprintCallable, Category = "Player")
+	void StartCameraFocus(AActor* FocusActor);
+
+	UFUNCTION(BlueprintCallable, Category = "Player")
+	void ExitCameraFocus();
+
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void ApplyLookDelta(double Delta);
 
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void ApplyLookPitchDelta(double Delta);
 
-	// ---- Componentes ----
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<USceneComponent> Root;
 
@@ -49,7 +55,6 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<USceneComponent> InspectionAnchor;
 
-	// ---- Estado (mesmos nomes das variáveis do BP, acessíveis por outros BPs) ----
 	UPROPERTY(BlueprintReadWrite, Category = "Estado")
 	bool IsTransitioning = false;
 
@@ -77,7 +82,6 @@ public:
 protected:
 	virtual void BeginPlay() override;
 
-	// ---- Input (atribuir no Class Defaults do BP filho) ----
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;
 
@@ -93,11 +97,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> PauseAction;
 
-	// ---- UI ----
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<UUserWidget> PauseMenuClass;
 
-	// ---- Look ----
 	UPROPERTY(EditAnywhere, Category = "Look")
 	double EdgeLookMargin = 80.0;
 
@@ -116,15 +118,30 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Look")
 	double PitchMax = 60.0;
 
-	// ---- Head bob ----
+	UPROPERTY(EditAnywhere, Category = "Inspeção")
+	double InspectionDistance = 120.0;
+
+	UPROPERTY(EditAnywhere, Category = "Inspeção")
+	bool bAutoFitInspectedObject = true;
+
+	UPROPERTY(EditAnywhere, Category = "Inspeção", meta = (EditCondition = "bAutoFitInspectedObject"))
+	double InspectionTargetSize = 40.0;
+
+	UPROPERTY(EditAnywhere, Category = "Inspeção")
+	bool bBlurBackground = true;
+
+	UPROPERTY(EditAnywhere, Category = "Inspeção", meta = (EditCondition = "bBlurBackground", ClampMin = "0.05"))
+	float InspectionBlurFStop = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category = "Inspeção")
+	bool bDisableShadowDuringInspection = true;
+
 	UPROPERTY(EditAnywhere, Category = "Bob")
 	double BobFrequency = 2.0;
 
 	UPROPERTY(EditAnywhere, Category = "Bob")
 	double BobAmplitude = 40.0;
 
-	// ---- Timelines ----
-	// Curvas opcionais: se ficarem vazias, o código cria as curvas padrão (ver BeginPlay no .cpp).
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	TObjectPtr<UCurveFloat> MoveCurve;
 
@@ -134,7 +151,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	TObjectPtr<UCurveFloat> InspectCurve;
 
-	// Duração (Length) de cada timeline, igual ao BP
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	float MoveLength = 0.65f;
 
@@ -144,7 +160,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	float InspectLength = 0.5f;
 
-	// ---- Internos ----
 	UPROPERTY()
 	TObjectPtr<APlayerController> CachedPlayerController;
 
@@ -163,6 +178,20 @@ protected:
 
 	FVector InspectStartLocation = FVector::ZeroVector;
 	FRotator InspectStartRotation = FRotator::ZeroRotator;
+	FRotator InspectExitRotation = FRotator::ZeroRotator;
+	FVector InspectStartScale = FVector::OneVector;
+	FVector InspectStartCenter = FVector::ZeroVector;
+	FVector InspectLocalCenterOffset = FVector::ZeroVector;
+	double InspectScaleRatio = 1.0;
+
+	bool bClickHeld = false;
+	bool bInspectDragging = false;
+	TMap<TWeakObjectPtr<UPrimitiveComponent>, bool> InspectedShadowStates;
+	FVector2D LastInspectMousePos = FVector2D::ZeroVector;
+
+	bool bExitingInspection = false;
+	bool bExitingCameraFocus = false;
+	bool bInspectedObjectHadCollision = true;
 
 	FTimeline MoveTimeline;
 	FTimeline CameraFocusTimeline;
@@ -181,16 +210,25 @@ protected:
 	void OnCameraFocusUpdate(float Alpha);
 
 	UFUNCTION()
+	void OnCameraFocusFinished();
+
+	UFUNCTION()
 	void OnInspectUpdate(float Alpha);
 
 	UFUNCTION()
 	void OnInspectFinished();
 
-	// ---- Handlers de input ----
 	void OnClick();
+	void OnClickReleased();
 	void OnGoBack();
 	void OnLook(const FInputActionValue& Value);
 	void OnPause();
 
 	void UpdateCameraRotation();
+
+	void PlaceInspectedObject(const FVector& CenterWorld, double ScaleRatio);
+	void UpdateInspectionRotation();
+	bool IsMouseNearScreenEdge();
+	void UpdateInspectionBlur(float Alpha);
+	void ClearInspectionBlur();
 };
