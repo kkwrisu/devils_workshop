@@ -12,7 +12,12 @@
 #include "InputCoreTypes.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
+#include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
+#include "GameFramework/GameUserSettings.h"
+#include "InventoryComponent.h"
+#include "InventoryWidget.h"
+#include "ItemUseTarget.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -57,6 +62,8 @@ APlayerBase::APlayerBase()
 	InspectionAnchor->SetupAttachment(Camera);
 	InspectionAnchor->SetRelativeLocation(FVector(120.0, 0.0, 0.0));
 	InspectionAnchor->SetRelativeRotation(FRotator::ZeroRotator);
+
+	Inventory = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory"));
 }
 
 void APlayerBase::InitTimeline(FTimeline& Timeline, TObjectPtr<UCurveFloat>& Curve, float Length,
@@ -82,9 +89,27 @@ void APlayerBase::InitTimeline(FTimeline& Timeline, TObjectPtr<UCurveFloat>& Cur
 	}
 }
 
+void APlayerBase::EnforceMinimumQuality()
+{
+	if (!GEngine) return;
+
+	UGameUserSettings* Settings = GEngine->GetGameUserSettings();
+	if (!Settings) return;
+
+	const int32 CurrentLevel = Settings->GetOverallScalabilityLevel();
+	if (CurrentLevel >= MinimumScalabilityLevel) return;
+
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: qualidade geral = %d, abaixo do minimo %d. Ajustando."), CurrentLevel, MinimumScalabilityLevel);
+
+	Settings->SetOverallScalabilityLevel(MinimumScalabilityLevel);
+	Settings->ApplyNonResolutionSettings();
+}
+
 void APlayerBase::BeginPlay()
 {
 	Super::BeginPlay();
+
+	EnforceMinimumQuality();
 
 	DefaultCameraRelativeLocation = Camera->GetRelativeLocation();
 	DefaultCameraRelativeRotation = Camera->GetRelativeRotation();
@@ -115,6 +140,21 @@ void APlayerBase::BeginPlay()
 		PC->bShowMouseCursor = true;
 		UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(PC, nullptr, EMouseLockMode::LockAlways, false);
 		UGameplayStatics::SetGamePaused(this, false);
+
+		if (InventoryWidgetClass)
+		{
+			InventoryWidget = CreateWidget<UInventoryWidget>(PC, InventoryWidgetClass);
+			if (InventoryWidget)
+			{
+				InventoryWidget->BindInventory(Inventory);
+				InventoryWidget->AddToViewport(10);
+				InventoryWidget->SetVisibility(ESlateVisibility::Collapsed);
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryWidgetClass não foi atribuída no Class Defaults."));
+		}
 	}
 }
 
@@ -145,6 +185,17 @@ void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponen
 
 	if (PauseAction) { EIC->BindAction(PauseAction, ETriggerEvent::Started, this, &APlayerBase::OnPause); }
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseAction não atribuída.")); }
+
+	if (InventoryAction)
+	{
+		EIC->BindAction(InventoryAction, ETriggerEvent::Started, this, &APlayerBase::OnInventoryOpen);
+		EIC->BindAction(InventoryAction, ETriggerEvent::Completed, this, &APlayerBase::OnInventoryClose);
+		EIC->BindAction(InventoryAction, ETriggerEvent::Canceled, this, &APlayerBase::OnInventoryClose);
+	}
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryAction não atribuída.")); }
+
+	if (InventoryScrollAction) { EIC->BindAction(InventoryScrollAction, ETriggerEvent::Triggered, this, &APlayerBase::OnInventoryScroll); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryScrollAction não atribuída.")); }
 }
 
 void APlayerBase::Tick(float DeltaTime)
@@ -157,7 +208,7 @@ void APlayerBase::Tick(float DeltaTime)
 
 	if (!CachedPlayerController) return;
 
-	if (!IsTransitioning && !isInspecting && !bIsCameraFocused)
+	if (!IsTransitioning && !isInspecting && !bIsCameraFocused && !bInventoryOpen)
 	{
 		float MouseX = 0.f;
 		float MouseY = 0.f;
@@ -214,7 +265,7 @@ void APlayerBase::ApplyLookPitchDelta(double Delta)
 
 void APlayerBase::OnLook(const FInputActionValue& Value)
 {
-	if (isInspecting || IsTransitioning || bIsCameraFocused) return;
+	if (isInspecting || IsTransitioning || bIsCameraFocused || bInventoryOpen) return;
 
 	const double Dt = GetWorld()->GetDeltaSeconds();
 	LookYawOffset = FMath::Clamp(LookYawOffset + static_cast<double>(Value.Get<float>()) * Dt * 60.0, -YawLimit, YawLimit);
@@ -240,6 +291,8 @@ bool APlayerBase::IsMouseNearScreenEdge()
 
 void APlayerBase::OnClick()
 {
+	if (bInventoryOpen) return;
+
 	bClickHeld = true;
 
 	UE_LOG(LogTemp, Warning, TEXT("OnClick chamado | isInspecting = %d | IsTransitioning = %d"), isInspecting ? 1 : 0, IsTransitioning ? 1 : 0);
@@ -297,6 +350,20 @@ void APlayerBase::OnClick()
 
 		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
 
+		if (Inventory && HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass()))
+		{
+			FInventoryItem Equipped;
+			if (Inventory->GetEquippedItem(Equipped) && IItemUseTarget::Execute_CanUseItem(HitActor, Equipped))
+			{
+				const bool bConsume = IItemUseTarget::Execute_UseItem(HitActor, Equipped, this);
+				if (bConsume)
+				{
+					Inventory->RemoveItem(Equipped.InstanceId);
+				}
+				return;
+			}
+		}
+
 		if (HitActor->ActorHasTag("Inspectable"))
 		{
 			StartInspection(HitActor);
@@ -333,11 +400,58 @@ void APlayerBase::OnClickReleased()
 	bInspectDragging = false;
 }
 
+void APlayerBase::OnInventoryOpen()
+{
+	if (bInventoryOpen || !Inventory) return;
+
+	bInventoryOpen = true;
+	bClickHeld = false;
+	bInspectDragging = false;
+
+	Inventory->BeginSelection();
+
+	if (InventoryWidget)
+	{
+		InventoryWidget->Open();
+	}
+}
+
+void APlayerBase::OnInventoryClose()
+{
+	if (!bInventoryOpen) return;
+
+	bInventoryOpen = false;
+
+	if (Inventory)
+	{
+		Inventory->ConfirmSelection();
+	}
+
+	if (InventoryWidget)
+	{
+		InventoryWidget->Close();
+	}
+}
+
+void APlayerBase::OnInventoryScroll(const FInputActionValue& Value)
+{
+	if (!bInventoryOpen || !Inventory) return;
+
+	const float Axis = Value.Get<float>();
+	if (FMath::IsNearlyZero(Axis)) return;
+
+	const double Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastInventoryScrollTime < InventoryScrollInterval) return;
+
+	LastInventoryScrollTime = Now;
+	Inventory->ScrollSelection(Axis > 0.f ? 1 : -1);
+}
+
 void APlayerBase::OnGoBack()
 {
 	UE_LOG(LogTemp, Warning, TEXT("OnGoBack chamado | isInspecting = %d | IsTransitioning = %d"), isInspecting ? 1 : 0, IsTransitioning ? 1 : 0);
 
-	if (IsTransitioning) return;
+	if (IsTransitioning || bInventoryOpen) return;
 
 	if (isInspecting)
 	{
@@ -539,7 +653,7 @@ void APlayerBase::PlaceInspectedObject(const FVector& CenterWorld, double ScaleR
 
 void APlayerBase::UpdateInspectionRotation()
 {
-	const bool bHolding = !IsTransitioning && InspectedObject && bClickHeld;
+	const bool bHolding = !IsTransitioning && InspectedObject && bClickHeld && !bInventoryOpen;
 
 	if (!bHolding)
 	{
@@ -656,6 +770,11 @@ void APlayerBase::ClearInspectionBlur()
 
 void APlayerBase::OnPause()
 {
+	if (bInventoryOpen)
+	{
+		OnInventoryClose();
+	}
+
 	if (!CachedPlayerController) return;
 
 	if (PauseMenuClass)

@@ -8,6 +8,8 @@
 class UCameraComponent;
 class USceneComponent;
 class UPrimitiveComponent;
+class UInventoryComponent;
+class UInventoryWidget;
 class UInputMappingContext;
 class UInputAction;
 class UCurveFloat;
@@ -55,6 +57,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<USceneComponent> InspectionAnchor;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UInventoryComponent> Inventory;
+
 	UPROPERTY(BlueprintReadWrite, Category = "Estado")
 	bool IsTransitioning = false;
 
@@ -63,6 +68,9 @@ public:
 
 	UPROPERTY(BlueprintReadWrite, Category = "Estado")
 	bool bIsCameraFocused = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Estado")
+	bool bInventoryOpen = false;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Estado")
 	TObjectPtr<AActor> CurrentAreaActor;
@@ -97,8 +105,20 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> PauseAction;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> InventoryAction;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> InventoryScrollAction;
+
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<UUserWidget> PauseMenuClass;
+
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UInventoryWidget> InventoryWidgetClass;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Inventário")
+	double InventoryScrollInterval = 0.12;
 
 	UPROPERTY(EditAnywhere, Category = "Look")
 	double EdgeLookMargin = 80.0;
@@ -136,6 +156,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	bool bDisableShadowDuringInspection = true;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Qualidade", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 MinimumScalabilityLevel = 3;
+
 	UPROPERTY(EditAnywhere, Category = "Bob")
 	double BobFrequency = 2.0;
 
@@ -162,6 +185,11 @@ protected:
 
 	UPROPERTY()
 	TObjectPtr<APlayerController> CachedPlayerController;
+
+	UPROPERTY()
+	TObjectPtr<UInventoryWidget> InventoryWidget;
+
+	double LastInventoryScrollTime = -1000.0;
 
 	FVector DefaultCameraRelativeLocation = FVector::ZeroVector;
 	FRotator DefaultCameraRelativeRotation = FRotator::ZeroRotator;
@@ -220,11 +248,15 @@ protected:
 
 	void OnClick();
 	void OnClickReleased();
+	void OnInventoryOpen();
+	void OnInventoryClose();
+	void OnInventoryScroll(const FInputActionValue& Value);
 	void OnGoBack();
 	void OnLook(const FInputActionValue& Value);
 	void OnPause();
 
 	void UpdateCameraRotation();
+	void EnforceMinimumQuality();
 
 	void PlaceInspectedObject(const FVector& CenterWorld, double ScaleRatio);
 	void UpdateInspectionRotation();
