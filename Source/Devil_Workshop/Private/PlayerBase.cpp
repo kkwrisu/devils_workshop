@@ -17,7 +17,8 @@
 #include "GameFramework/GameUserSettings.h"
 #include "InventoryComponent.h"
 #include "InventoryWidget.h"
-#include "ItemUseTarget.h"
+#include "ItemPickup.h"
+#include "ItemUsePartComponent.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -148,7 +149,7 @@ void APlayerBase::BeginPlay()
 			{
 				InventoryWidget->BindInventory(Inventory);
 				InventoryWidget->AddToViewport(10);
-				InventoryWidget->SetVisibility(ESlateVisibility::Collapsed);
+				InventoryWidget->Close();
 			}
 		}
 		else
@@ -173,7 +174,7 @@ void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponen
 	{
 		EIC->BindAction(ClickAction, ETriggerEvent::Started, this, &APlayerBase::OnClick);
 		EIC->BindAction(ClickAction, ETriggerEvent::Completed, this, &APlayerBase::OnClickReleased);
-		EIC->BindAction(ClickAction, ETriggerEvent::Canceled, this, &APlayerBase::OnClickReleased);
+		EIC->BindAction(ClickAction, ETriggerEvent::Canceled, this, &APlayerBase::OnClickCanceled);
 	}
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: ClickAction não atribuída.")); }
 
@@ -317,6 +318,11 @@ void APlayerBase::OnClick()
 			{
 				ExitInspection();
 			}
+			else
+			{
+				bInspectClickPending = true;
+				InspectClickDragDistance = 0.0;
+			}
 		}
 		return;
 	}
@@ -350,18 +356,10 @@ void APlayerBase::OnClick()
 
 		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
 
-		if (Inventory && HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass()))
+		if (AItemPickup* Pickup = Cast<AItemPickup>(HitActor))
 		{
-			FInventoryItem Equipped;
-			if (Inventory->GetEquippedItem(Equipped) && IItemUseTarget::Execute_CanUseItem(HitActor, Equipped))
-			{
-				const bool bConsume = IItemUseTarget::Execute_UseItem(HitActor, Equipped, this);
-				if (bConsume)
-				{
-					Inventory->RemoveItem(Equipped.InstanceId);
-				}
-				return;
-			}
+			Pickup->Collect(Inventory);
+			return;
 		}
 
 		if (HitActor->ActorHasTag("Inspectable"))
@@ -396,8 +394,74 @@ void APlayerBase::OnClickReleased()
 {
 	UE_LOG(LogTemp, Warning, TEXT("Click solto"));
 
+	const bool bWasPending = bInspectClickPending;
+
 	bClickHeld = false;
 	bInspectDragging = false;
+	bInspectClickPending = false;
+
+	if (bWasPending && isInspecting && !IsTransitioning && !bInventoryOpen && InspectClickDragDistance <= InspectClickMaxDrag)
+	{
+		TryUseEquippedItemOnInspected();
+	}
+}
+
+void APlayerBase::OnClickCanceled()
+{
+	bClickHeld = false;
+	bInspectDragging = false;
+	bInspectClickPending = false;
+}
+
+bool APlayerBase::TraceInspectedPart(FHitResult& OutHit, UItemUsePartComponent*& OutPart)
+{
+	OutPart = nullptr;
+
+	if (!CachedPlayerController || !InspectedObject) return false;
+
+	FVector WorldOrigin;
+	FVector WorldDirection;
+	if (!CachedPlayerController->DeprojectMousePositionToWorld(WorldOrigin, WorldDirection)) return false;
+
+	const FVector TraceEnd = WorldOrigin + WorldDirection * 10000.0;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(InspectionPartTrace), true);
+	Params.AddIgnoredActor(this);
+
+	if (!GetWorld()->LineTraceSingleByChannel(OutHit, WorldOrigin, TraceEnd, ECC_Visibility, Params)) return false;
+	if (OutHit.GetActor() != InspectedObject) return false;
+
+	OutPart = Cast<UItemUsePartComponent>(OutHit.GetComponent());
+	return OutPart != nullptr;
+}
+
+void APlayerBase::TryUseEquippedItemOnInspected()
+{
+	if (!Inventory || !InspectedObject) return;
+
+	FHitResult Hit;
+	UItemUsePartComponent* Part = nullptr;
+	if (!TraceInspectedPart(Hit, Part)) return;
+
+	FInventoryItem Equipped;
+	if (!Inventory->GetEquippedItem(Equipped))
+	{
+		Part->NotifyEmptyHandClick(this);
+		return;
+	}
+
+	bool bConsume = false;
+	if (!Part->TryUseItem(Equipped, this, bConsume)) return;
+
+	if (bConsume)
+	{
+		Inventory->RemoveItem(Equipped.InstanceId);
+	}
+
+	if (Part->RewardItem)
+	{
+		Inventory->AddItem(Part->RewardItem);
+	}
 }
 
 void APlayerBase::OnInventoryOpen()
@@ -407,6 +471,8 @@ void APlayerBase::OnInventoryOpen()
 	bInventoryOpen = true;
 	bClickHeld = false;
 	bInspectDragging = false;
+
+	bInspectClickPending = false;
 
 	Inventory->BeginSelection();
 
@@ -601,8 +667,8 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 		}
 	}
 
-	bInspectedObjectHadCollision = TargetObject->GetActorEnableCollision();
-	TargetObject->SetActorEnableCollision(false);
+	bInspectClickPending = false;
+	InspectClickDragDistance = 0.0;
 
 	InspectedShadowStates.Reset();
 	if (bDisableShadowDuringInspection)
@@ -633,6 +699,7 @@ void APlayerBase::ExitInspection()
 
 	UE_LOG(LogTemp, Warning, TEXT("ExitInspection chamado"));
 
+	bInspectClickPending = false;
 	InspectExitRotation = InspectedObject->GetActorRotation();
 	bExitingInspection = true;
 	bInspectDragging = false;
@@ -674,6 +741,8 @@ void APlayerBase::UpdateInspectionRotation()
 	if (bInspectDragging)
 	{
 		const FVector2D Delta = Current - LastInspectMousePos;
+
+		InspectClickDragDistance += Delta.Size();
 
 		const double DX = Delta.X;
 		const double DY = -Delta.Y;
@@ -723,7 +792,6 @@ void APlayerBase::OnInspectFinished()
 		{
 			InspectedObject->SetActorScale3D(InspectStartScale);
 			InspectedObject->SetActorLocationAndRotation(InspectStartLocation, InspectStartRotation);
-			InspectedObject->SetActorEnableCollision(bInspectedObjectHadCollision);
 		}
 
 		for (const TPair<TWeakObjectPtr<UPrimitiveComponent>, bool>& Entry : InspectedShadowStates)

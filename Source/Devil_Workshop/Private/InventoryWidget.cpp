@@ -8,6 +8,7 @@ void UInventoryWidget::BindInventory(UInventoryComponent* InInventory)
 	{
 		Inventory->OnItemsChanged.RemoveDynamic(this, &UInventoryWidget::HandleItemsChanged);
 		Inventory->OnSelectionChanged.RemoveDynamic(this, &UInventoryWidget::HandleSelectionChanged);
+		Inventory->OnEquippedChanged.RemoveDynamic(this, &UInventoryWidget::HandleEquippedChanged);
 	}
 
 	Inventory = InInventory;
@@ -16,9 +17,11 @@ void UInventoryWidget::BindInventory(UInventoryComponent* InInventory)
 	{
 		Inventory->OnItemsChanged.AddDynamic(this, &UInventoryWidget::HandleItemsChanged);
 		Inventory->OnSelectionChanged.AddDynamic(this, &UInventoryWidget::HandleSelectionChanged);
+		Inventory->OnEquippedChanged.AddDynamic(this, &UInventoryWidget::HandleEquippedChanged);
 	}
 
 	OnItemsRefreshed();
+	OnEquippedUpdated(Inventory ? Inventory->GetEquippedInstanceId() : INDEX_NONE);
 }
 
 void UInventoryWidget::Open()
@@ -35,7 +38,7 @@ void UInventoryWidget::Open()
 
 void UInventoryWidget::Close()
 {
-	SetVisibility(ESlateVisibility::Collapsed);
+	SetVisibility(bKeepVisibleWhenClosed ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
 	OnInventoryClosed();
 }
 
@@ -47,4 +50,9 @@ void UInventoryWidget::HandleItemsChanged()
 void UInventoryWidget::HandleSelectionChanged(int32 SelectedIndex)
 {
 	OnSelectionUpdated(SelectedIndex);
+}
+
+void UInventoryWidget::HandleEquippedChanged(int32 EquippedInstanceId)
+{
+	OnEquippedUpdated(EquippedInstanceId);
 }

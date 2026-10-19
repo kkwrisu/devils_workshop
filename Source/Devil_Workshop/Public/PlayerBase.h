@@ -10,12 +10,14 @@ class USceneComponent;
 class UPrimitiveComponent;
 class UInventoryComponent;
 class UInventoryWidget;
+class UItemUsePartComponent;
 class UInputMappingContext;
 class UInputAction;
 class UCurveFloat;
 class UUserWidget;
 class APlayerController;
 struct FInputActionValue;
+struct FHitResult;
 
 UCLASS(Blueprintable)
 class APlayerBase : public APawn
@@ -147,6 +149,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Inspeção", meta = (EditCondition = "bAutoFitInspectedObject"))
 	double InspectionTargetSize = 40.0;
 
+	UPROPERTY(EditAnywhere, Category = "Inspeção", meta = (ClampMin = "0"))
+	double InspectClickMaxDrag = 6.0;
+
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	bool bBlurBackground = true;
 
@@ -213,13 +218,14 @@ protected:
 	double InspectScaleRatio = 1.0;
 
 	bool bClickHeld = false;
+	bool bInspectClickPending = false;
+	double InspectClickDragDistance = 0.0;
 	bool bInspectDragging = false;
 	TMap<TWeakObjectPtr<UPrimitiveComponent>, bool> InspectedShadowStates;
 	FVector2D LastInspectMousePos = FVector2D::ZeroVector;
 
 	bool bExitingInspection = false;
 	bool bExitingCameraFocus = false;
-	bool bInspectedObjectHadCollision = true;
 
 	FTimeline MoveTimeline;
 	FTimeline CameraFocusTimeline;
@@ -248,6 +254,7 @@ protected:
 
 	void OnClick();
 	void OnClickReleased();
+	void OnClickCanceled();
 	void OnInventoryOpen();
 	void OnInventoryClose();
 	void OnInventoryScroll(const FInputActionValue& Value);
@@ -263,4 +270,7 @@ protected:
 	bool IsMouseNearScreenEdge();
 	void UpdateInspectionBlur(float Alpha);
 	void ClearInspectionBlur();
+
+	bool TraceInspectedPart(FHitResult& OutHit, UItemUsePartComponent*& OutPart);
+	void TryUseEquippedItemOnInspected();
 };
