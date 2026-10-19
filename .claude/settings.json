@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      {
+        "description": "Allow Unreal Engine build commands",
+        "command": "*",
+        "isBackground": false
+      }
+    ]
+  },
+  "editor": {
+    "defaultOpenIn": "vscode"
+  },
+  "taskCompletion": {
+    "notification": "enabled"
+  }
+}
