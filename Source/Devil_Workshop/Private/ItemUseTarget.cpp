@@ -2,11 +2,3 @@
 
 
 #include "ItemUseTarget.h"
-
-ItemUseTarget::ItemUseTarget()
-{
-}
-
-ItemUseTarget::~ItemUseTarget()
-{
-}
