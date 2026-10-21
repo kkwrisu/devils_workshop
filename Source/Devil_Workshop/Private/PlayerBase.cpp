@@ -133,7 +133,7 @@ void APlayerBase::BeginPlay()
 			}
 			else
 			{
-				UE_LOG(LogTemp, Warning, TEXT("PlayerBase: DefaultMappingContext n„o foi atribuÌdo no Class Defaults."));
+				UE_LOG(LogTemp, Warning, TEXT("PlayerBase: DefaultMappingContext nao foi atribuido no Class Defaults."));
 			}
 		}
 
@@ -149,53 +149,21 @@ void APlayerBase::BeginPlay()
 				InventoryWidget->BindInventory(Inventory);
 				InventoryWidget->AddToViewport(10);
 				InventoryWidget->SetVisibility(ESlateVisibility::Collapsed);
+
+				// DEBUG: for√ßa abrir invent√°rio no BeginPlay
+				InventoryWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+				UE_LOG(LogTemp, Warning, TEXT("DEBUG: Widget aberto for√ßadamente no BeginPlay!"));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Error, TEXT("DEBUG: InventoryWidget √â NULO!"));
 			}
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryWidgetClass n„o foi atribuÌda no Class Defaults."));
+			UE_LOG(LogTemp, Error, TEXT("DEBUG: InventoryWidgetClass N√ÉO SETADA no PlayerBase!"));
 		}
 	}
-}
-
-void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
-{
-	Super::SetupPlayerInputComponent(PlayerInputComponent);
-
-	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent);
-	if (!EIC)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: o Input Component n„o È um EnhancedInputComponent (Project Settings > Input > Default Classes)."));
-		return;
-	}
-
-	if (ClickAction)
-	{
-		EIC->BindAction(ClickAction, ETriggerEvent::Started, this, &APlayerBase::OnClick);
-		EIC->BindAction(ClickAction, ETriggerEvent::Completed, this, &APlayerBase::OnClickReleased);
-		EIC->BindAction(ClickAction, ETriggerEvent::Canceled, this, &APlayerBase::OnClickReleased);
-	}
-	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: ClickAction n„o atribuÌda.")); }
-
-	if (GoBackAction) { EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack); }
-	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: GoBackAction n„o atribuÌda.")); }
-
-	if (LookAction) { EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &APlayerBase::OnLook); }
-	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: LookAction n„o atribuÌda.")); }
-
-	if (PauseAction) { EIC->BindAction(PauseAction, ETriggerEvent::Started, this, &APlayerBase::OnPause); }
-	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseAction n„o atribuÌda.")); }
-
-	if (InventoryAction)
-	{
-		EIC->BindAction(InventoryAction, ETriggerEvent::Started, this, &APlayerBase::OnInventoryOpen);
-		EIC->BindAction(InventoryAction, ETriggerEvent::Completed, this, &APlayerBase::OnInventoryClose);
-		EIC->BindAction(InventoryAction, ETriggerEvent::Canceled, this, &APlayerBase::OnInventoryClose);
-	}
-	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryAction n„o atribuÌda.")); }
-
-	if (InventoryScrollAction) { EIC->BindAction(InventoryScrollAction, ETriggerEvent::Triggered, this, &APlayerBase::OnInventoryScroll); }
-	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryScrollAction n„o atribuÌda.")); }
 }
 
 void APlayerBase::Tick(float DeltaTime)
@@ -244,6 +212,8 @@ void APlayerBase::Tick(float DeltaTime)
 	{
 		bInspectDragging = false;
 	}
+
+	RotatePreviews(DeltaTime);
 }
 
 void APlayerBase::UpdateCameraRotation()
@@ -341,7 +311,7 @@ void APlayerBase::OnClick()
 		FHitResult Hit;
 		if (!GetWorld()->LineTraceSingleByChannel(Hit, WorldOrigin, TraceEnd, ECC_Visibility, Params))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Click: trace %d n„o acertou nada"), i);
+			UE_LOG(LogTemp, Warning, TEXT("Click: trace %d n√£o acertou nada"), i);
 			break;
 		}
 
@@ -568,7 +538,7 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 		if (TargetRoot->Mobility != EComponentMobility::Movable)
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("PlayerBase: '%s' È Inspectable mas n„o est· como Movable. Mude a Mobility para Movable no Details."),
+				TEXT("PlayerBase: '%s' √© Inspectable mas n√£o est√° como Movable. Mude a Mobility para Movable no Details."),
 				*TargetObject->GetName());
 		}
 	}
@@ -786,10 +756,62 @@ void APlayerBase::OnPause()
 	}
 	else
 	{
-		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseMenuClass n„o foi atribuÌda no Class Defaults."));
+		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseMenuClass n√£o foi atribu√≠da no Class Defaults."));
 	}
 
 	CachedPlayerController->bShowMouseCursor = true;
 	UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(CachedPlayerController, nullptr, EMouseLockMode::DoNotLock, false);
 	UGameplayStatics::SetGamePaused(this, true);
+}
+
+void APlayerBase::RotatePreviews(float DeltaTime)
+{
+	float YawDelta = PreviewRotationSpeed * DeltaTime;
+	for (AActor* Actor : PreviewActors)
+	{
+		if (Actor && Actor->IsValidLowLevel())
+		{
+			Actor->AddActorWorldRotation(FRotator(0.0f, YawDelta, 0.0f));
+		}
+	}
+}
+
+void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent);
+	if (!EIC)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: o Input Component n√£o √© um EnhancedInputComponent (Project Settings > Input > Default Classes)."));
+		return;
+	}
+
+	if (ClickAction)
+	{
+		EIC->BindAction(ClickAction, ETriggerEvent::Started, this, &APlayerBase::OnClick);
+		EIC->BindAction(ClickAction, ETriggerEvent::Completed, this, &APlayerBase::OnClickReleased);
+		EIC->BindAction(ClickAction, ETriggerEvent::Canceled, this, &APlayerBase::OnClickReleased);
+	}
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: ClickAction n√£o atribu√≠da.")); }
+
+	if (GoBackAction) { EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: GoBackAction n√£o atribu√≠da.")); }
+
+	if (LookAction) { EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &APlayerBase::OnLook); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: LookAction n√£o atribu√≠da.")); }
+
+	if (PauseAction) { EIC->BindAction(PauseAction, ETriggerEvent::Started, this, &APlayerBase::OnPause); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: PauseAction n√£o atribu√≠da.")); }
+
+	if (InventoryAction)
+	{
+		EIC->BindAction(InventoryAction, ETriggerEvent::Started, this, &APlayerBase::OnInventoryOpen);
+		EIC->BindAction(InventoryAction, ETriggerEvent::Completed, this, &APlayerBase::OnInventoryClose);
+		EIC->BindAction(InventoryAction, ETriggerEvent::Canceled, this, &APlayerBase::OnInventoryClose);
+	}
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryAction n√£o atribu√≠da.")); }
+
+	if (InventoryScrollAction) { EIC->BindAction(InventoryScrollAction, ETriggerEvent::Triggered, this, &APlayerBase::OnInventoryScroll); }
+	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: InventoryScrollAction n√£o atribu√≠da.")); }
 }

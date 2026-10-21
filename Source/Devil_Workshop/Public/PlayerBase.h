@@ -15,6 +15,9 @@ class UInputAction;
 class UCurveFloat;
 class UUserWidget;
 class APlayerController;
+class UTextureRenderTarget2D;
+class UMaterialInstanceDynamic;
+class USceneCaptureComponent2D;
 struct FInputActionValue;
 
 UCLASS(Blueprintable)
@@ -117,7 +120,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<UInventoryWidget> InventoryWidgetClass;
 
-	UPROPERTY(EditDefaultsOnly, Category = "Invent·rio")
+	UPROPERTY(EditDefaultsOnly, Category = "Invent√°rio")
 	double InventoryScrollInterval = 0.12;
 
 	UPROPERTY(EditAnywhere, Category = "Look")
@@ -138,22 +141,22 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Look")
 	double PitchMax = 60.0;
 
-	UPROPERTY(EditAnywhere, Category = "InspeÁ„o")
+	UPROPERTY(EditAnywhere, Category = "Inspe√ß√£o")
 	double InspectionDistance = 120.0;
 
-	UPROPERTY(EditAnywhere, Category = "InspeÁ„o")
+	UPROPERTY(EditAnywhere, Category = "Inspe√ß√£o")
 	bool bAutoFitInspectedObject = true;
 
-	UPROPERTY(EditAnywhere, Category = "InspeÁ„o", meta = (EditCondition = "bAutoFitInspectedObject"))
+	UPROPERTY(EditAnywhere, Category = "Inspe√ß√£o", meta = (EditCondition = "bAutoFitInspectedObject"))
 	double InspectionTargetSize = 40.0;
 
-	UPROPERTY(EditAnywhere, Category = "InspeÁ„o")
+	UPROPERTY(EditAnywhere, Category = "Inspe√ß√£o")
 	bool bBlurBackground = true;
 
-	UPROPERTY(EditAnywhere, Category = "InspeÁ„o", meta = (EditCondition = "bBlurBackground", ClampMin = "0.05"))
+	UPROPERTY(EditAnywhere, Category = "Inspe√ß√£o", meta = (EditCondition = "bBlurBackground", ClampMin = "0.05"))
 	float InspectionBlurFStop = 0.3f;
 
-	UPROPERTY(EditAnywhere, Category = "InspeÁ„o")
+	UPROPERTY(EditAnywhere, Category = "Inspe√ß√£o")
 	bool bDisableShadowDuringInspection = true;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Qualidade", meta = (ClampMin = "0", ClampMax = "4"))
@@ -263,4 +266,16 @@ protected:
 	bool IsMouseNearScreenEdge();
 	void UpdateInspectionBlur(float Alpha);
 	void ClearInspectionBlur();
+
+	// Preview 3D system
+	void RotatePreviews(float DeltaTime);
+
+private:
+	// Preview 3D system
+	float PreviewRotationSpeed = 30.0f;
+	int32 MaxPreviewSlots = 20;
+	TArray<TObjectPtr<AActor>> PreviewActors;
+	TArray<TObjectPtr<USceneCaptureComponent2D>> PreviewCaptures;
+	TArray<TObjectPtr<UTextureRenderTarget2D>> PreviewRenderTargets;
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> PreviewMaterials;
 };
