@@ -18,6 +18,7 @@
 #include "InventoryComponent.h"
 #include "InventoryWidget.h"
 #include "ItemUseTarget.h"
+#include "RepairPart.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -149,10 +150,6 @@ void APlayerBase::BeginPlay()
 				InventoryWidget->BindInventory(Inventory);
 				InventoryWidget->AddToViewport(10);
 				InventoryWidget->SetVisibility(ESlateVisibility::Collapsed);
-
-				// DEBUG: força abrir inventário no BeginPlay
-				InventoryWidget->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-				UE_LOG(LogTemp, Warning, TEXT("DEBUG: Widget aberto forçadamente no BeginPlay!"));
 			}
 			else
 			{
@@ -206,6 +203,7 @@ void APlayerBase::Tick(float DeltaTime)
 	}
 	else if (isInspecting)
 	{
+		UpdateInspectionZoom(DeltaTime);
 		UpdateInspectionRotation();
 	}
 	else
@@ -287,6 +285,10 @@ void APlayerBase::OnClick()
 			{
 				ExitInspection();
 			}
+			else
+			{
+				TryUseItemOnPart();
+			}
 		}
 		return;
 	}
@@ -362,6 +364,49 @@ void APlayerBase::OnClick()
 	}
 }
 
+void APlayerBase::TryUseItemOnPart()
+{
+	if (!Inventory || !CachedPlayerController) return;
+
+	FInventoryItem Equipped;
+	if (!Inventory->GetEquippedItem(Equipped)) return;
+
+	FVector WorldOrigin;
+	FVector WorldDirection;
+	if (!CachedPlayerController->DeprojectMousePositionToWorld(WorldOrigin, WorldDirection)) return;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(PartClickTrace), true);
+	Params.AddIgnoredActor(this);
+
+	FHitResult Hit;
+	if (!GetWorld()->LineTraceSingleByChannel(Hit, WorldOrigin, WorldOrigin + WorldDirection * 100000.0, ECC_Visibility, Params)) return;
+
+	AActor* HitActor = Hit.GetActor();
+	if (!HitActor || !HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass())) return;
+	if (!IItemUseTarget::Execute_CanUseItem(HitActor, Equipped)) return;
+
+	if (IItemUseTarget::Execute_UseItem(HitActor, Equipped, this))
+	{
+		Inventory->RemoveItem(Equipped.InstanceId);
+	}
+}
+
+void APlayerBase::SetPartsInteractable(AActor* Parent, bool bInteractable)
+{
+	if (!Parent) return;
+
+	TArray<AActor*> Attached;
+	Parent->GetAttachedActors(Attached);
+
+	for (AActor* Child : Attached)
+	{
+		if (ARepairPart* Part = Cast<ARepairPart>(Child))
+		{
+			Part->SetInteractable(bInteractable);
+		}
+	}
+}
+
 void APlayerBase::OnClickReleased()
 {
 	UE_LOG(LogTemp, Warning, TEXT("Click solto"));
@@ -405,9 +450,18 @@ void APlayerBase::OnInventoryClose()
 
 void APlayerBase::OnInventoryScroll(const FInputActionValue& Value)
 {
-	if (!bInventoryOpen || !Inventory) return;
-
 	const float Axis = Value.Get<float>();
+
+	if (isInspecting && !bInventoryOpen)
+	{
+		if (!IsTransitioning && !bWorkingOnPart && !FMath::IsNearlyZero(Axis))
+		{
+			InspectionZoomTarget = FMath::Clamp(InspectionZoomTarget - Axis * InspectionZoomStep, InspectionZoomMin, InspectionZoomMax);
+		}
+		return;
+	}
+
+	if (!bInventoryOpen || !Inventory) return;
 	if (FMath::IsNearlyZero(Axis)) return;
 
 	const double Now = GetWorld()->GetTimeSeconds();
@@ -543,6 +597,8 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 		}
 	}
 
+	InspectionZoomTarget = InspectionDistance;
+
 	InspectedObject = TargetObject;
 	isInspecting = true;
 	IsTransitioning = true;
@@ -588,6 +644,8 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 	}
 
 	InspectTimeline.PlayFromStart();
+
+	SetPartsInteractable(TargetObject, true);
 }
 
 void APlayerBase::ExitInspection()
@@ -609,6 +667,8 @@ void APlayerBase::ExitInspection()
 	IsTransitioning = true;
 
 	InspectTimeline.ReverseFromEnd();
+
+	SetPartsInteractable(InspectedObject, false);
 }
 
 void APlayerBase::PlaceInspectedObject(const FVector& CenterWorld, double ScaleRatio)
@@ -621,9 +681,26 @@ void APlayerBase::PlaceInspectedObject(const FVector& CenterWorld, double ScaleR
 	InspectedObject->SetActorLocation(CenterWorld - Q.RotateVector(InspectLocalCenterOffset * ScaleRatio));
 }
 
+void APlayerBase::UpdateInspectionZoom(float DeltaTime)
+{
+	if (!InspectedObject || IsTransitioning) return;
+
+	const double Current = InspectionAnchor->GetRelativeLocation().X;
+	if (FMath::IsNearlyEqual(Current, InspectionZoomTarget, 0.01)) return;
+
+	const double NewDistance = FMath::FInterpTo(Current, InspectionZoomTarget, static_cast<double>(DeltaTime), InspectionZoomSpeed);
+	InspectionAnchor->SetRelativeLocation(FVector(NewDistance, 0.0, 0.0));
+	PlaceInspectedObject(InspectionAnchor->GetComponentLocation(), InspectScaleRatio);
+
+	if (bBlurBackground)
+	{
+		Camera->PostProcessSettings.DepthOfFieldFocalDistance = static_cast<float>(NewDistance);
+	}
+}
+
 void APlayerBase::UpdateInspectionRotation()
 {
-	const bool bHolding = !IsTransitioning && InspectedObject && bClickHeld && !bInventoryOpen;
+	const bool bHolding = !IsTransitioning && InspectedObject && bClickHeld && !bInventoryOpen && !bWorkingOnPart;
 
 	if (!bHolding)
 	{
@@ -709,6 +786,9 @@ void APlayerBase::OnInspectFinished()
 		isInspecting = false;
 		bInspectDragging = false;
 
+		InspectionAnchor->SetRelativeLocation(FVector(InspectionDistance, 0.0, 0.0));
+		InspectionZoomTarget = InspectionDistance;
+
 		ClearInspectionBlur();
 	}
 }
@@ -721,7 +801,7 @@ void APlayerBase::UpdateInspectionBlur(float Alpha)
 	PP.bOverride_DepthOfFieldFocalDistance = true;
 	PP.bOverride_DepthOfFieldFstop = true;
 
-	PP.DepthOfFieldFocalDistance = static_cast<float>(InspectionDistance);
+	PP.DepthOfFieldFocalDistance = static_cast<float>(InspectionAnchor->GetRelativeLocation().X);
 
 	const float InvFStop = FMath::Lerp(1.f / 32.f, 1.f / FMath::Max(InspectionBlurFStop, 0.05f), Alpha);
 	PP.DepthOfFieldFstop = 1.f / InvFStop;

@@ -2,14 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
-#include "Components/WrapBox.h"
-#include "Components/CanvasPanel.h"
 #include "InventoryTypes.h"
 #include "InventoryWidget.generated.h"
 
 class UInventoryComponent;
 class UWrapBox;
-class UCanvasPanel;
 class UVerticalBox;
 class UBorder;
 class UImage;
@@ -30,9 +27,14 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Inventario")
 	TObjectPtr<UInventoryComponent> Inventory;
 
-	/** Material base para preview 3D - cria uma vez no Editor (Material > User Interface > TextureSampleParameter2D chamado "PreviewTexture") */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Inventario|Preview3D")
 	TObjectPtr<UMaterial> PreviewBaseMaterial;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario|Preview3D")
+	bool bUse3DPreview = false;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario")
+	bool bKeepVisibleWhenClosed = false;
 
 	UFUNCTION(BlueprintCallable, Category = "Inventario")
 	void BindInventory(UInventoryComponent* InInventory);
@@ -55,9 +57,15 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Inventario")
 	void OnSelectionUpdated(int32 SelectedIndex);
 
+	UFUNCTION(BlueprintImplementableEvent, Category = "Inventario")
+	void OnEquippedUpdated(int32 EquippedInstanceId);
+
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
+
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UWrapBox> ItemsWrapBox;
 
 	UFUNCTION()
 	void HandleItemsChanged();
@@ -65,13 +73,15 @@ protected:
 	UFUNCTION()
 	void HandleSelectionChanged(int32 SelectedIndex);
 
+	UFUNCTION()
+	void HandleEquippedChanged(int32 EquippedInstanceId);
+
 private:
 	void RebuildItemList();
 	UVerticalBox* CreateItemSlot(const FInventoryItem& Item, int32 ItemIndex);
 	void UpdateSelectionVisual(int32 NewSelectedIndex);
 	void UpdateItemPreviews();
 
-	// Preview 3D system
 	void InitializePreviewSystem();
 	void ShutdownPreviewSystem();
 	UTextureRenderTarget2D* GetOrCreateRenderTarget(int32 SlotIndex);
@@ -81,15 +91,15 @@ private:
 	void RotatePreviews(float DeltaTime);
 
 	UPROPERTY()
-	TObjectPtr<UCanvasPanel> RootCanvas;
+	TArray<TObjectPtr<AActor>> PreviewActors;
 
 	UPROPERTY()
-	TObjectPtr<UWrapBox> ItemsWrapBox;
-
-	// Preview actors/components (hidden in a preview scene)
-	TArray<TObjectPtr<AActor>> PreviewActors;
 	TArray<TObjectPtr<USceneCaptureComponent2D>> PreviewCaptures;
+
+	UPROPERTY()
 	TArray<TObjectPtr<UTextureRenderTarget2D>> PreviewRenderTargets;
+
+	UPROPERTY()
 	TArray<TObjectPtr<UMaterialInstanceDynamic>> PreviewMaterials;
 
 	int32 LastSelectedIndex = INDEX_NONE;

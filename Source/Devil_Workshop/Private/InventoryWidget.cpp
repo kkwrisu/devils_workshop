@@ -7,13 +7,12 @@
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
-#include "Components/CanvasPanel.h"
-#include "Components/CanvasPanelSlot.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/Material.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -25,29 +24,7 @@ void UInventoryWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	if (!RootCanvas)
-	{
-		RootCanvas = NewObject<UCanvasPanel>(this, TEXT("RootCanvas"));
-		if (RootCanvas)
-		{
-			// UUserWidget doesn't have SetContent, we need to set the root widget differently
-			// For a UserWidget, we set the content via the widget tree or by adding to viewport
-			// Since we're creating the UI programmatically, we'll build the widget tree here
-
-			ItemsWrapBox = NewObject<UWrapBox>(RootCanvas, TEXT("ItemsWrapBox"));
-			if (ItemsWrapBox)
-			{
-				UCanvasPanelSlot* CanvasSlot = RootCanvas->AddChildToCanvas(ItemsWrapBox);
-				if (CanvasSlot)
-				{
-					CanvasSlot->SetAnchors(FAnchors(0.5f, 0.5f, 0.5f, 0.5f));
-					CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
-					CanvasSlot->SetSize(FVector2D(520.0f, 400.0f));
-					CanvasSlot->SetPosition(FVector2D(0.0f, 0.0f));
-				}
-			}
-		}
-	}
+	UE_LOG(LogTemp, Warning, TEXT("InventoryWidget: NativeConstruct | ItemsWrapBox = %d"), ItemsWrapBox ? 1 : 0);
 
 	InitializePreviewSystem();
 
@@ -65,7 +42,7 @@ void UInventoryWidget::NativeDestruct()
 
 void UInventoryWidget::InitializePreviewSystem()
 {
-	if (!GetWorld()) return;
+	if (!bUse3DPreview || !GetWorld()) return;
 
 	PreviewActors.SetNum(MaxPreviewSlots);
 	PreviewCaptures.SetNum(MaxPreviewSlots);
@@ -194,14 +171,12 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 			}
 		}
 
-		// bCaptureEveryFrame=true já captura todo frame automaticamente
-		// NÃO chamar CaptureScene() manualmente (evita warning de ineficiência)
 	}
 }
 
 void UInventoryWidget::UpdateItemPreviews()
 {
-	if (!Inventory) return;
+	if (!bUse3DPreview || !Inventory) return;
 
 	const TArray<FInventoryItem>& Items = Inventory->GetItems();
 	for (int32 i = 0; i < Items.Num() && i < MaxPreviewSlots; ++i)
@@ -231,6 +206,7 @@ void UInventoryWidget::BindInventory(UInventoryComponent* InInventory)
 	{
 		Inventory->OnItemsChanged.RemoveDynamic(this, &UInventoryWidget::HandleItemsChanged);
 		Inventory->OnSelectionChanged.RemoveDynamic(this, &UInventoryWidget::HandleSelectionChanged);
+		Inventory->OnEquippedChanged.RemoveDynamic(this, &UInventoryWidget::HandleEquippedChanged);
 	}
 
 	Inventory = InInventory;
@@ -239,13 +215,17 @@ void UInventoryWidget::BindInventory(UInventoryComponent* InInventory)
 	{
 		Inventory->OnItemsChanged.AddDynamic(this, &UInventoryWidget::HandleItemsChanged);
 		Inventory->OnSelectionChanged.AddDynamic(this, &UInventoryWidget::HandleSelectionChanged);
+		Inventory->OnEquippedChanged.AddDynamic(this, &UInventoryWidget::HandleEquippedChanged);
 
 		RebuildItemList();
+		OnEquippedUpdated(Inventory->GetEquippedInstanceId());
 	}
 }
 
 void UInventoryWidget::Open()
 {
+	UE_LOG(LogTemp, Warning, TEXT("InventoryWidget: Open chamado"));
+
 	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
 	OnInventoryOpened();
 
@@ -258,7 +238,7 @@ void UInventoryWidget::Open()
 
 void UInventoryWidget::Close()
 {
-	SetVisibility(ESlateVisibility::Collapsed);
+	SetVisibility(bKeepVisibleWhenClosed ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
 	OnInventoryClosed();
 }
 
@@ -273,8 +253,15 @@ void UInventoryWidget::HandleSelectionChanged(int32 SelectedIndex)
 	OnSelectionUpdated(SelectedIndex);
 }
 
+void UInventoryWidget::HandleEquippedChanged(int32 EquippedInstanceId)
+{
+	OnEquippedUpdated(EquippedInstanceId);
+}
+
 void UInventoryWidget::RebuildItemList()
 {
+	UE_LOG(LogTemp, Warning, TEXT("InventoryWidget: RebuildItemList | ItemsWrapBox = %d | Inventory = %d | itens = %d"), ItemsWrapBox ? 1 : 0, Inventory ? 1 : 0, Inventory ? Inventory->GetItems().Num() : -1);
+
 	if (!ItemsWrapBox || !Inventory) return;
 
 	ItemsWrapBox->ClearChildren();
@@ -303,12 +290,14 @@ void UInventoryWidget::RebuildItemList()
 	ApplyPreviewMaterialsToImages();
 	UpdateSelectionVisual(Inventory ? Inventory->GetSelectedIndex() : INDEX_NONE);
 
+	UE_LOG(LogTemp, Warning, TEXT("InventoryWidget: lista montada | filhos = %d | visibilidade = %d | no viewport = %d"), ItemsWrapBox->GetChildrenCount(), static_cast<int32>(GetVisibility()), IsInViewport() ? 1 : 0);
+
 	OnItemsRefreshed();
 }
 
 void UInventoryWidget::ApplyPreviewMaterialsToImages()
 {
-	if (!ItemsWrapBox) return;
+	if (!bUse3DPreview || !ItemsWrapBox) return;
 
 	for (int32 i = 0; i < ItemsWrapBox->GetChildrenCount() && i < MaxPreviewSlots; ++i)
 	{
@@ -352,6 +341,11 @@ UVerticalBox* UInventoryWidget::CreateItemSlot(const FInventoryItem& Item, int32
 		if (PreviewImage)
 		{
 			PreviewImage->SetDesiredSizeOverride(FVector2D(96.0f, 96.0f));
+
+			if (Item.Data->Icon)
+			{
+				PreviewImage->SetBrushFromTexture(Item.Data->Icon);
+			}
 			PreviewBorder->SetContent(PreviewImage);
 		}
 

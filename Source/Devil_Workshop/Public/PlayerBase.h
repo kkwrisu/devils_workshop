@@ -51,6 +51,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void ApplyLookPitchDelta(double Delta);
 
+	bool IsClickHeld() const { return bClickHeld; }
+	void SetWorkingOnPart(bool bWorking) { bWorkingOnPart = bWorking; }
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<USceneComponent> Root;
 
@@ -144,6 +147,19 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	double InspectionDistance = 120.0;
 
+	UPROPERTY(EditAnywhere, Category = "Inspeção|Zoom")
+	double InspectionZoomMin = 50.0;
+
+	UPROPERTY(EditAnywhere, Category = "Inspeção|Zoom")
+	double InspectionZoomMax = 200.0;
+
+	// Distancia percorrida por tick de scroll (use valor negativo para inverter o sentido)
+	UPROPERTY(EditAnywhere, Category = "Inspeção|Zoom")
+	double InspectionZoomStep = 15.0;
+
+	UPROPERTY(EditAnywhere, Category = "Inspeção|Zoom")
+	double InspectionZoomSpeed = 10.0;
+
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	bool bAutoFitInspectedObject = true;
 
@@ -216,6 +232,8 @@ protected:
 	double InspectScaleRatio = 1.0;
 
 	bool bClickHeld = false;
+	double InspectionZoomTarget = 120.0;
+	bool bWorkingOnPart = false;
 	bool bInspectDragging = false;
 	TMap<TWeakObjectPtr<UPrimitiveComponent>, bool> InspectedShadowStates;
 	FVector2D LastInspectMousePos = FVector2D::ZeroVector;
@@ -250,6 +268,8 @@ protected:
 	void OnInspectFinished();
 
 	void OnClick();
+	void TryUseItemOnPart();
+	void SetPartsInteractable(AActor* Parent, bool bInteractable);
 	void OnClickReleased();
 	void OnInventoryOpen();
 	void OnInventoryClose();
@@ -263,6 +283,7 @@ protected:
 
 	void PlaceInspectedObject(const FVector& CenterWorld, double ScaleRatio);
 	void UpdateInspectionRotation();
+	void UpdateInspectionZoom(float DeltaTime);
 	bool IsMouseNearScreenEdge();
 	void UpdateInspectionBlur(float Alpha);
 	void ClearInspectionBlur();
