@@ -25,6 +25,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Monsters/MonsterTypes.h"
 
 static UCurveFloat* MakeDefaultCurve(UObject* Outer, float EndTime, float EndValue, bool bSmooth)
 {
@@ -332,6 +333,20 @@ void APlayerBase::OnClick()
 				{
 					Inventory->RemoveItem(Equipped.InstanceId);
 				}
+
+				// Broadcast noise event if the item makes noise (Radio, Bell, etc.)
+				if (Equipped.Data && (Equipped.Data->HasTag("Radio") || Equipped.Data->HasTag("NoiseMaker") || Equipped.Data->HasTag("Bell")))
+				{
+					FNoiseEvent NoiseEvent;
+					NoiseEvent.NoiseTag = MonsterTags::Noise_Event_Radio_Active;
+					NoiseEvent.Location = GetActorLocation();
+					NoiseEvent.Loudness = 1.0f;
+					NoiseEvent.HearRange = 2000.0f;
+					NoiseEvent.Instigator = this;
+					NoiseEvent.Timestamp = GetWorld()->GetTimeSeconds();
+					OnPlayerMadeNoise.Broadcast(NoiseEvent);
+				}
+
 				return;
 			}
 		}
@@ -351,6 +366,13 @@ void APlayerBase::OnClick()
 			if (!FallbackClickable) FallbackClickable = HitActor;
 			Params.AddIgnoredActor(HitActor);
 			continue;
+		}
+
+		// Check for Door interaction
+		if (HitActor->ActorHasTag("Door"))
+		{
+			OnPlayerClosedDoor.Broadcast(HitActor);
+			return;
 		}
 
 		break;
@@ -580,6 +602,14 @@ void APlayerBase::OnCameraFocusFinished()
 	{
 		bExitingCameraFocus = false;
 		bIsCameraFocused = false;
+	}
+	else
+	{
+		// Player finished focusing on something - check if it was a security camera
+		if (InspectedObject && InspectedObject->ActorHasTag("SecurityCamera"))
+		{
+			OnPlayerUsedSecurityCamera.Broadcast(InspectedObject);
+		}
 	}
 }
 

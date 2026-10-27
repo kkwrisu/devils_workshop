@@ -2,11 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
-#include "MonsterTypes.h"
+#include "Monsters/MonsterTypes.h"
 #include "IMovableTool.generated.h"
 
 UINTERFACE(MinimalAPI, BlueprintType)
-class UIMovableTool : public UInterface
+class UMovableTool : public UInterface
 {
     GENERATED_BODY()
 };

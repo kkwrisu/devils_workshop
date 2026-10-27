@@ -2,11 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
-#include "MonsterTypes.h"
+#include "Monsters/MonsterTypes.h"
 #include "ILightSource.generated.h"
 
 UINTERFACE(MinimalAPI, BlueprintType)
-class UILightSource : public UInterface
+class ULightSource : public UInterface
 {
     GENERATED_BODY()
 };

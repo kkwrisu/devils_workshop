@@ -1,34 +1,83 @@
 #include "Monsters/MonsterTypes.h"
 
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Loud);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Quiet);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_ScrewTurn);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Footstep_Walk);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Footstep_Run);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Door_Open);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Door_Close);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Item_Drop);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Noise_Event_Radio_Active);
+namespace MonsterTags
+{
+    // Noise Events
+    FGameplayTag Noise_Event;
+    FGameplayTag Noise_Event_Loud;
+    FGameplayTag Noise_Event_Quiet;
+    FGameplayTag Noise_Event_ScrewTurn;
+    FGameplayTag Noise_Event_Footstep_Walk;
+    FGameplayTag Noise_Event_Footstep_Run;
+    FGameplayTag Noise_Event_Door_Open;
+    FGameplayTag Noise_Event_Door_Close;
+    FGameplayTag Noise_Event_Item_Drop;
+    FGameplayTag Noise_Event_Radio_Active;
 
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Resource_Electricity);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Resource_Oil);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Resource_Battery);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Resource_Camera);
+    // Resources (FNAF style)
+    FGameplayTag Resource_Electricity;
+    FGameplayTag Resource_Oil;
+    FGameplayTag Resource_Battery;
+    FGameplayTag Resource_Camera;
 
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::State_Idle);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::State_Patrol);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::State_Investigate);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::State_Chase);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::State_Attack);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::State_Hiding);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::State_Peeking);
+    // Creature States
+    FGameplayTag State_Idle;
+    FGameplayTag State_Patrol;
+    FGameplayTag State_Investigate;
+    FGameplayTag State_Chase;
+    FGameplayTag State_Attack;
+    FGameplayTag State_Hiding;
+    FGameplayTag State_Peeking;
 
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Creature_Peeker);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Creature_LightHater);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Creature_CeilingCrawler);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Creature_GlowHider);
+    // Creature Types
+    FGameplayTag Creature_Peeker;
+    FGameplayTag Creature_LightHater;
+    FGameplayTag Creature_CeilingCrawler;
+    FGameplayTag Creature_GlowHider;
 
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Light_Source);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Light_Flashlight);
-UE_DEFINE_GAMEPLAY_TAG(MonsterTags::Light_Environmental);
+    // Light
+    FGameplayTag Light_Source;
+    FGameplayTag Light_Flashlight;
+    FGameplayTag Light_Environmental;
+
+    void InitializeTags()
+    {
+        // Noise Events
+        Noise_Event = FGameplayTag::RequestGameplayTag("Noise.Event");
+        Noise_Event_Loud = FGameplayTag::RequestGameplayTag("Noise.Event.Loud");
+        Noise_Event_Quiet = FGameplayTag::RequestGameplayTag("Noise.Event.Quiet");
+        Noise_Event_ScrewTurn = FGameplayTag::RequestGameplayTag("Noise.Event.ScrewTurn");
+        Noise_Event_Footstep_Walk = FGameplayTag::RequestGameplayTag("Noise.Event.Footstep.Walk");
+        Noise_Event_Footstep_Run = FGameplayTag::RequestGameplayTag("Noise.Event.Footstep.Run");
+        Noise_Event_Door_Open = FGameplayTag::RequestGameplayTag("Noise.Event.Door.Open");
+        Noise_Event_Door_Close = FGameplayTag::RequestGameplayTag("Noise.Event.Door.Close");
+        Noise_Event_Item_Drop = FGameplayTag::RequestGameplayTag("Noise.Event.Item.Drop");
+        Noise_Event_Radio_Active = FGameplayTag::RequestGameplayTag("Noise.Event.Radio.Active");
+
+        // Resources
+        Resource_Electricity = FGameplayTag::RequestGameplayTag("Resource.Electricity");
+        Resource_Oil = FGameplayTag::RequestGameplayTag("Resource.Oil");
+        Resource_Battery = FGameplayTag::RequestGameplayTag("Resource.Battery");
+        Resource_Camera = FGameplayTag::RequestGameplayTag("Resource.Camera");
+
+        // Creature States
+        State_Idle = FGameplayTag::RequestGameplayTag("State.Idle");
+        State_Patrol = FGameplayTag::RequestGameplayTag("State.Patrol");
+        State_Investigate = FGameplayTag::RequestGameplayTag("State.Investigate");
+        State_Chase = FGameplayTag::RequestGameplayTag("State.Chase");
+        State_Attack = FGameplayTag::RequestGameplayTag("State.Attack");
+        State_Hiding = FGameplayTag::RequestGameplayTag("State.Hiding");
+        State_Peeking = FGameplayTag::RequestGameplayTag("State.Peeking");
+
+        // Creature Types
+        Creature_Peeker = FGameplayTag::RequestGameplayTag("Creature.Peeker");
+        Creature_LightHater = FGameplayTag::RequestGameplayTag("Creature.LightHater");
+        Creature_CeilingCrawler = FGameplayTag::RequestGameplayTag("Creature.CeilingCrawler");
+        Creature_GlowHider = FGameplayTag::RequestGameplayTag("Creature.GlowHider");
+
+        // Light
+        Light_Source = FGameplayTag::RequestGameplayTag("Light.Source");
+        Light_Flashlight = FGameplayTag::RequestGameplayTag("Light.Flashlight");
+        Light_Environmental = FGameplayTag::RequestGameplayTag("Light.Environmental");
+    }
+}

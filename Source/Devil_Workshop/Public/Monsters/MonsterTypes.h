@@ -7,42 +7,45 @@
 namespace MonsterTags
 {
     // Noise Events
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Loud);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Quiet);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_ScrewTurn);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Footstep_Walk);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Footstep_Run);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Door_Open);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Door_Close);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Item_Drop);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Noise_Event_Radio_Active);
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Loud;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Quiet;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_ScrewTurn;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Footstep_Walk;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Footstep_Run;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Door_Open;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Door_Close;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Item_Drop;
+    extern DEVIL_WORKSHOP_API FGameplayTag Noise_Event_Radio_Active;
 
     // Resources (FNAF style)
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Resource_Electricity);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Resource_Oil);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Resource_Battery);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Resource_Camera);
+    extern DEVIL_WORKSHOP_API FGameplayTag Resource_Electricity;
+    extern DEVIL_WORKSHOP_API FGameplayTag Resource_Oil;
+    extern DEVIL_WORKSHOP_API FGameplayTag Resource_Battery;
+    extern DEVIL_WORKSHOP_API FGameplayTag Resource_Camera;
 
     // Creature States
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Idle);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Patrol);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Investigate);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Chase);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Attack);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Hiding);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Peeking);
+    extern DEVIL_WORKSHOP_API FGameplayTag State_Idle;
+    extern DEVIL_WORKSHOP_API FGameplayTag State_Patrol;
+    extern DEVIL_WORKSHOP_API FGameplayTag State_Investigate;
+    extern DEVIL_WORKSHOP_API FGameplayTag State_Chase;
+    extern DEVIL_WORKSHOP_API FGameplayTag State_Attack;
+    extern DEVIL_WORKSHOP_API FGameplayTag State_Hiding;
+    extern DEVIL_WORKSHOP_API FGameplayTag State_Peeking;
 
     // Creature Types
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Creature_Peeker);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Creature_LightHater);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Creature_CeilingCrawler);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Creature_GlowHider);
+    extern DEVIL_WORKSHOP_API FGameplayTag Creature_Peeker;
+    extern DEVIL_WORKSHOP_API FGameplayTag Creature_LightHater;
+    extern DEVIL_WORKSHOP_API FGameplayTag Creature_CeilingCrawler;
+    extern DEVIL_WORKSHOP_API FGameplayTag Creature_GlowHider;
 
     // Light
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Light_Source);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Light_Flashlight);
-    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Light_Environmental);
+    extern DEVIL_WORKSHOP_API FGameplayTag Light_Source;
+    extern DEVIL_WORKSHOP_API FGameplayTag Light_Flashlight;
+    extern DEVIL_WORKSHOP_API FGameplayTag Light_Environmental;
+
+    // Helper para inicializar todas as tags (chamar no BeginPlay do GameMode ou similar)
+    DEVIL_WORKSHOP_API void InitializeTags();
 }
 
 UENUM(BlueprintType)

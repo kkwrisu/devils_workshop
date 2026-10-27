@@ -2,11 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Interface.h"
-#include "MonsterTypes.h"
+#include "Monsters/MonsterTypes.h"
 #include "INoiseMaker.generated.h"
 
 UINTERFACE(MinimalAPI, BlueprintType)
-class UINoiseMaker : public UInterface
+class UNoiseMaker : public UInterface
 {
     GENERATED_BODY()
 };

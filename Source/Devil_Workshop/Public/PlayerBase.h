@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
 #include "Components/TimelineComponent.h"
+#include "Monsters/MonsterTypes.h"
 #include "PlayerBase.generated.h"
 
 class UCameraComponent;
@@ -183,6 +184,20 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Bob")
 	double BobAmplitude = 40.0;
+
+	// Monster Reaction Delegates
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerUsedSecurityCamera, AActor*, CameraActor);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerClosedDoor, AActor*, DoorActor);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerMadeNoise, const FNoiseEvent&, NoiseEvent);
+
+	UPROPERTY(BlueprintAssignable, Category = "Monsters")
+	FOnPlayerUsedSecurityCamera OnPlayerUsedSecurityCamera;
+
+	UPROPERTY(BlueprintAssignable, Category = "Monsters")
+	FOnPlayerClosedDoor OnPlayerClosedDoor;
+
+	UPROPERTY(BlueprintAssignable, Category = "Monsters")
+	FOnPlayerMadeNoise OnPlayerMadeNoise;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	TObjectPtr<UCurveFloat> MoveCurve;
