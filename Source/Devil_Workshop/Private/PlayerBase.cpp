@@ -19,6 +19,9 @@
 #include "InventoryWidget.h"
 #include "ItemUseTarget.h"
 #include "RepairPart.h"
+#include "RepairableComponent.h"
+#include "RepairProgressWidget.h"
+#include "RepairStep.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -206,6 +209,12 @@ void APlayerBase::Tick(float DeltaTime)
 	{
 		UpdateInspectionZoom(DeltaTime);
 		UpdateInspectionRotation();
+
+		// Atualiza progresso de reparo ativo (novo sistema data-driven)
+		if (bIsActivelyRepairing && CurrentRepairableComponent)
+		{
+			UpdateActiveRepair(DeltaTime);
+		}
 	}
 	else
 	{
@@ -288,6 +297,12 @@ void APlayerBase::OnClick()
 			}
 			else
 			{
+				// Tenta primeiro o novo sistema de reparo (data-driven)
+				if (bEnableNewRepairSystem)
+				{
+					TryUseItemOnRepairable();
+				}
+				// Fallback para o sistema antigo (ARepairPart actors)
 				TryUseItemOnPart();
 			}
 		}
@@ -404,7 +419,26 @@ void APlayerBase::TryUseItemOnPart()
 	if (!GetWorld()->LineTraceSingleByChannel(Hit, WorldOrigin, WorldOrigin + WorldDirection * 100000.0, ECC_Visibility, Params)) return;
 
 	AActor* HitActor = Hit.GetActor();
-	if (!HitActor || !HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass())) return;
+	if (!HitActor) return;
+
+	// 1. Tenta o novo sistema de reparo (URepairableComponent no actor ou no parent)
+	if (bEnableNewRepairSystem)
+	{
+		URepairableComponent* Repairable = HitActor->FindComponentByClass<URepairableComponent>();
+		if (!Repairable && HitActor->GetAttachParentActor())
+		{
+			Repairable = HitActor->GetAttachParentActor()->FindComponentByClass<URepairableComponent>();
+		}
+
+		if (Repairable && Repairable->CanUseItem(Equipped))
+		{
+			Repairable->UseItem(Equipped, this);
+			return;
+		}
+	}
+
+	// 2. Fallback para o sistema antigo (ARepairPart actors implementando IItemUseTarget)
+	if (!HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass())) return;
 	if (!IItemUseTarget::Execute_CanUseItem(HitActor, Equipped)) return;
 
 	if (IItemUseTarget::Execute_UseItem(HitActor, Equipped, this))
@@ -435,6 +469,12 @@ void APlayerBase::OnClickReleased()
 
 	bClickHeld = false;
 	bInspectDragging = false;
+
+	// Para reparo ativo se houver
+	if (bIsActivelyRepairing)
+	{
+		StopRepairInteraction();
+	}
 }
 
 void APlayerBase::OnInventoryOpen()
@@ -691,6 +731,12 @@ void APlayerBase::ExitInspection()
 
 	UE_LOG(LogTemp, Warning, TEXT("ExitInspection chamado"));
 
+	// Para reparo ativo ao sair da inspeção
+	if (bIsActivelyRepairing)
+	{
+		StopRepairInteraction();
+	}
+
 	InspectExitRotation = InspectedObject->GetActorRotation();
 	bExitingInspection = true;
 	bInspectDragging = false;
@@ -884,6 +930,194 @@ void APlayerBase::RotatePreviews(float DeltaTime)
 			Actor->AddActorWorldRotation(FRotator(0.0f, YawDelta, 0.0f));
 		}
 	}
+}
+
+// --- Novo Sistema de Reparo Data-Driven ---
+
+void APlayerBase::TryUseItemOnRepairable()
+{
+	if (!Inventory || !CachedPlayerController || !InspectedObject) return;
+
+	FInventoryItem Equipped;
+	if (!Inventory->GetEquippedItem(Equipped)) return;
+
+	// Procura URepairableComponent no objeto inspecionado
+	URepairableComponent* Repairable = InspectedObject->FindComponentByClass<URepairableComponent>();
+	if (!Repairable)
+	{
+		return;
+	}
+
+	// Verifica se pode usar o item equipado
+	if (!Repairable->CanUseItem(Equipped))
+	{
+		return;
+	}
+
+	// Inicia interação de reparo
+	StartRepairInteraction(Repairable);
+
+	// Tenta usar o item (isso vai iniciar o passo apropriado)
+	Repairable->UseItem(Equipped, this);
+}
+
+void APlayerBase::UpdateActiveRepair(float DeltaTime)
+{
+	if (!CurrentRepairableComponent || !bIsActivelyRepairing) return;
+
+	// Atualiza progresso do componente de reparo
+	CurrentRepairableComponent->UpdateRepairProgress(DeltaTime);
+
+	// Atualiza widget de progresso
+	if (RepairProgressWidget)
+	{
+		const int32 ActiveStepIndex = CurrentRepairableComponent->GetActiveStepIndex();
+		if (ActiveStepIndex != INDEX_NONE)
+		{
+			const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
+			RepairProgressWidget->UpdateProgress(ActiveStep.CurrentProgress);
+		}
+	}
+
+	// Verifica se o jogador soltou o clique ou trocou de ferramenta
+	if (!IsClickHeld())
+	{
+		StopRepairInteraction();
+	}
+	else if (Inventory)
+	{
+		FInventoryItem Equipped;
+		if (!Inventory->GetEquippedItem(Equipped) || !Equipped.Data)
+		{
+			StopRepairInteraction();
+		}
+		else
+		{
+			const int32 ActiveStepIndex = CurrentRepairableComponent->GetActiveStepIndex();
+			if (ActiveStepIndex != INDEX_NONE)
+			{
+				const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
+				if (!Equipped.Data->HasTag(ActiveStep.RequiredToolTag))
+				{
+					StopRepairInteraction();
+				}
+			}
+		}
+	}
+}
+
+void APlayerBase::StartRepairInteraction(URepairableComponent* Repairable)
+{
+	if (!Repairable) return;
+
+	CurrentRepairableComponent = Repairable;
+	bIsActivelyRepairing = true;
+
+	// Cria/mostra widget de progresso
+	if (RepairProgressWidgetClass && !RepairProgressWidget)
+	{
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			RepairProgressWidget = CreateWidget<URepairProgressWidget>(PC, RepairProgressWidgetClass);
+			if (RepairProgressWidget)
+			{
+				RepairProgressWidget->AddToViewport(5); // Acima do inventário
+			}
+		}
+	}
+
+	// Bind delegates
+	if (CurrentRepairableComponent)
+	{
+		CurrentRepairableComponent->OnStepStarted.AddDynamic(this, &APlayerBase::OnRepairStepStarted);
+		CurrentRepairableComponent->OnStepProgress.AddDynamic(this, &APlayerBase::OnRepairStepProgress);
+		CurrentRepairableComponent->OnStepCompleted.AddDynamic(this, &APlayerBase::OnRepairStepCompleted);
+		CurrentRepairableComponent->OnAllRepairsCompleted.AddDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Iniciado reparo em '%s'"), *InspectedObject->GetName());
+}
+
+void APlayerBase::StopRepairInteraction()
+{
+	if (!bIsActivelyRepairing) return;
+
+	bIsActivelyRepairing = false;
+
+	// Para o componente de reparo
+	if (CurrentRepairableComponent)
+	{
+		CurrentRepairableComponent->StopRepair();
+
+		CurrentRepairableComponent->OnStepStarted.RemoveDynamic(this, &APlayerBase::OnRepairStepStarted);
+		CurrentRepairableComponent->OnStepProgress.RemoveDynamic(this, &APlayerBase::OnRepairStepProgress);
+		CurrentRepairableComponent->OnStepCompleted.RemoveDynamic(this, &APlayerBase::OnRepairStepCompleted);
+		CurrentRepairableComponent->OnAllRepairsCompleted.RemoveDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+	}
+
+	// Esconde widget
+	if (RepairProgressWidget)
+	{
+		RepairProgressWidget->Hide();
+		RepairProgressWidget = nullptr;
+	}
+
+	CurrentRepairableComponent = nullptr;
+
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Reparo interrompido"));
+}
+
+void APlayerBase::OnRepairStepStarted(const FRepairStep& Step)
+{
+	if (RepairProgressWidget)
+	{
+		RepairProgressWidget->SetStep(Step);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Passo de reparo iniciado: %s"), *Step.StepId.ToString());
+}
+
+void APlayerBase::OnRepairStepProgress(const FRepairStep& Step, float Progress)
+{
+	if (RepairProgressWidget)
+	{
+		RepairProgressWidget->UpdateProgress(Progress);
+	}
+}
+
+void APlayerBase::OnRepairStepCompleted(const FRepairStep& Step)
+{
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Passo de reparo completado: %s"), *Step.StepId.ToString());
+
+	// O widget continua mostrando o progresso até o próximo passo ser iniciado
+	// O próximo passo só inicia quando o jogador clica novamente com a ferramenta certa
+}
+
+void APlayerBase::OnAllRepairsCompleted()
+{
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: TODOS OS REPAROS COMPLETOS em '%s'!"), *InspectedObject->GetName());
+
+	// Esconde widget após um delay
+	if (RepairProgressWidget)
+	{
+		FTimerHandle TimerHandle;
+		GetWorldTimerManager().SetTimer(TimerHandle, [this]()
+		{
+			if (RepairProgressWidget)
+			{
+				RepairProgressWidget->Hide();
+			}
+		}, 2.0f, false);
+	}
+
+	StopRepairInteraction();
+
+	// Aqui você pode adicionar lógica extra:
+	// - Trocar mesh do objeto para versão "reparada"
+	// - Habilitar funcionalidade do objeto (ex.: rádio toca)
+	// - Dar item ao jogador
+	// - Tocar som de sucesso
+	// - Trigger evento de quest
 }
 
 void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)

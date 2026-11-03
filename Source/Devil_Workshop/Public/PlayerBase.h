@@ -4,6 +4,7 @@
 #include "GameFramework/Pawn.h"
 #include "Components/TimelineComponent.h"
 #include "Monsters/MonsterTypes.h"
+#include "RepairStep.h"
 #include "PlayerBase.generated.h"
 
 class UCameraComponent;
@@ -19,6 +20,8 @@ class APlayerController;
 class UTextureRenderTarget2D;
 class UMaterialInstanceDynamic;
 class USceneCaptureComponent2D;
+class URepairableComponent;
+class URepairProgressWidget;
 struct FInputActionValue;
 
 UCLASS(Blueprintable)
@@ -170,6 +173,20 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	bool bBlurBackground = true;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Reparo|UI")
+	TSubclassOf<UUserWidget> RepairProgressWidgetClass;
+
+	UPROPERTY()
+	TObjectPtr<URepairProgressWidget> RepairProgressWidget;
+
+	UPROPERTY()
+	TObjectPtr<URepairableComponent> CurrentRepairableComponent;
+
+	UPROPERTY(EditAnywhere, Category = "Reparo")
+	bool bEnableNewRepairSystem = true;
+
+	bool bIsActivelyRepairing = false;
+
 	UPROPERTY(EditAnywhere, Category = "Inspeção", meta = (EditCondition = "bBlurBackground", ClampMin = "0.05"))
 	float InspectionBlurFStop = 0.3f;
 
@@ -286,6 +303,16 @@ protected:
 	void TryUseItemOnPart();
 	void SetPartsInteractable(AActor* Parent, bool bInteractable);
 	void OnClickReleased();
+
+	// --- Novo Sistema de Reparo ---
+	void TryUseItemOnRepairable();
+	void UpdateActiveRepair(float DeltaTime);
+	void StartRepairInteraction(URepairableComponent* Repairable);
+	void StopRepairInteraction();
+	void OnRepairStepStarted(const FRepairStep& Step);
+	void OnRepairStepProgress(const FRepairStep& Step, float Progress);
+	void OnRepairStepCompleted(const FRepairStep& Step);
+	void OnAllRepairsCompleted();
 	void OnInventoryOpen();
 	void OnInventoryClose();
 	void OnInventoryScroll(const FInputActionValue& Value);
