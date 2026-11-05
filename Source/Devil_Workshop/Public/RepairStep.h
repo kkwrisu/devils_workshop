@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/DataTable.h"
 #include "RepairStep.generated.h"
 
 class UParticleSystem;
@@ -12,7 +13,7 @@ class UCurveFloat;
  * Tudo é configurado via DataTable ou array no Editor - zero atores extras.
  */
 USTRUCT(BlueprintType)
-struct FRepairStep
+struct FRepairStep : public FTableRowBase
 {
     GENERATED_BODY()
 

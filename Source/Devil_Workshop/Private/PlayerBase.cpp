@@ -3,6 +3,9 @@
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/ShapeComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Components/Widget.h"
 #include "CollisionQueryParams.h"
 #include "Curves/CurveFloat.h"
@@ -682,7 +685,37 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 
 	FVector BoundsOrigin = FVector::ZeroVector;
 	FVector BoundsExtent = FVector::ZeroVector;
-	TargetObject->GetActorBounds(false, BoundsOrigin, BoundsExtent);
+
+	// Mede só os meshes visíveis. Para Skeletal Mesh, usa o bounds do asset
+	// (e não o do componente, que pode ser afetado pelo Physics Asset).
+	FBox VisualBox(ForceInit);
+	TArray<UPrimitiveComponent*> BoundsPrimitives;
+	TargetObject->GetComponents<UPrimitiveComponent>(BoundsPrimitives);
+	for (UPrimitiveComponent* Prim : BoundsPrimitives)
+	{
+		if (!Prim || !Prim->IsRegistered() || Cast<UShapeComponent>(Prim)) continue;
+
+		if (const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim))
+		{
+			if (const USkeletalMesh* MeshAsset = Skel->GetSkeletalMeshAsset())
+			{
+				VisualBox += MeshAsset->GetBounds().TransformBy(Skel->GetComponentTransform()).GetBox();
+				continue;
+			}
+		}
+		VisualBox += Prim->Bounds.GetBox();
+	}
+
+	if (VisualBox.IsValid)
+	{
+		VisualBox.GetCenterAndExtents(BoundsOrigin, BoundsExtent);
+	}
+	else
+	{
+		TargetObject->GetActorBounds(false, BoundsOrigin, BoundsExtent);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("Inspecao: bounds origem = %s | extensao = %s | escala do ator = %s"), *BoundsOrigin.ToString(), *BoundsExtent.ToString(), *TargetObject->GetActorScale3D().ToString());
 
 	InspectStartCenter = BoundsOrigin;
 	InspectLocalCenterOffset = TargetObject->GetActorQuat().UnrotateVector(BoundsOrigin - InspectStartLocation);
@@ -1102,12 +1135,12 @@ void APlayerBase::OnAllRepairsCompleted()
 	{
 		FTimerHandle TimerHandle;
 		GetWorldTimerManager().SetTimer(TimerHandle, [this]()
-		{
-			if (RepairProgressWidget)
 			{
-				RepairProgressWidget->Hide();
-			}
-		}, 2.0f, false);
+				if (RepairProgressWidget)
+				{
+					RepairProgressWidget->Hide();
+				}
+			}, 2.0f, false);
 	}
 
 	StopRepairInteraction();
