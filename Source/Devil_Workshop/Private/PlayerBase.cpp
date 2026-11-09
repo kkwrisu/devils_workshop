@@ -433,9 +433,9 @@ void APlayerBase::TryUseItemOnPart()
 			Repairable = HitActor->GetAttachParentActor()->FindComponentByClass<URepairableComponent>();
 		}
 
-		if (Repairable && Repairable->CanUseItem(Equipped))
+		if (Repairable && IItemUseTarget::Execute_CanUseItem(Repairable, Equipped))
 		{
-			Repairable->UseItem(Equipped, this);
+			IItemUseTarget::Execute_UseItem(Repairable, Equipped, this);
 			return;
 		}
 	}
@@ -700,8 +700,9 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 			if (const USkeletalMesh* MeshAsset = Skel->GetSkeletalMeshAsset())
 			{
 				VisualBox += MeshAsset->GetBounds().TransformBy(Skel->GetComponentTransform()).GetBox();
-				continue;
 			}
+			// Skeletal Mesh Component sem mesh (vazio) nao entra na medida
+			continue;
 		}
 		VisualBox += Prim->Bounds.GetBox();
 	}
@@ -982,7 +983,7 @@ void APlayerBase::TryUseItemOnRepairable()
 	}
 
 	// Verifica se pode usar o item equipado
-	if (!Repairable->CanUseItem(Equipped))
+	if (!IItemUseTarget::Execute_CanUseItem(Repairable, Equipped))
 	{
 		return;
 	}
@@ -991,7 +992,7 @@ void APlayerBase::TryUseItemOnRepairable()
 	StartRepairInteraction(Repairable);
 
 	// Tenta usar o item (isso vai iniciar o passo apropriado)
-	Repairable->UseItem(Equipped, this);
+	IItemUseTarget::Execute_UseItem(Repairable, Equipped, this);
 }
 
 void APlayerBase::UpdateActiveRepair(float DeltaTime)
