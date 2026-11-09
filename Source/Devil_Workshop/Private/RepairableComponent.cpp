@@ -332,6 +332,7 @@ void URepairableComponent::ResetRepair()
                 if (!Step.MorphTargetName.IsNone())
                 {
                     SkelMesh->SetMorphTarget(Step.MorphTargetName, 0.0f);
+                    SkelMesh->SetMorphTarget(FName(*(Step.MorphTargetName.ToString() + TEXT("_Hide"))), 0.0f);
                 }
             }
         }
@@ -432,6 +433,21 @@ void URepairableComponent::CompleteActiveStep()
     ActiveStep->CurrentProgress = 1.0f;
     ActiveStep->bIsActive = false;
     ApplyMorphTarget(*ActiveStep, 1.0f);
+
+    // Faz a peça sumir de vez: se o mesh tiver o morph "<NomeDoMorph>_Hide", volta o morph de
+    // progresso para 0 e liga o _Hide em 1 (a peça colapsa num ponto, no lugar original).
+    if (!ActiveStep->MorphTargetName.IsNone())
+    {
+        if (USkeletalMeshComponent* HideSkelMesh = GetSkeletalMesh())
+        {
+            const FName HideMorphName(*(ActiveStep->MorphTargetName.ToString() + TEXT("_Hide")));
+            if (HideSkelMesh->FindMorphTarget(HideMorphName))
+            {
+                HideSkelMesh->SetMorphTarget(ActiveStep->MorphTargetName, 0.0f);
+                HideSkelMesh->SetMorphTarget(HideMorphName, 1.0f);
+            }
+        }
+    }
 
     // Efeitos de conclusão
     if (!CompletedSocket.IsNone())
