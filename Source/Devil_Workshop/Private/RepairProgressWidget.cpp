@@ -53,9 +53,9 @@ void URepairProgressWidget::Hide()
         if (UWorld* World = GetWorld())
         {
             World->GetTimerManager().SetTimer(TimerHandle, [this]()
-            {
-                SetVisibility(ESlateVisibility::Collapsed);
-            }, 0.3f, false);
+                {
+                    SetVisibility(ESlateVisibility::Collapsed);
+                }, 0.3f, false);
         }
     }
     else
@@ -78,12 +78,20 @@ void URepairProgressWidget::UpdateVisuals()
         InstructionText->SetText(CurrentStep.InstructionText);
     }
 
-    if (ToolRequiredText && !CurrentStep.RequiredToolTag.IsNone())
+    if (ToolRequiredText)
     {
-        ToolRequiredText->SetText(FText::Format(
-            FText::FromString(TEXT("Ferramenta: {0}")),
-            FText::FromName(CurrentStep.RequiredToolTag)
-        ));
+        if (!CurrentStep.RequiredToolTag.IsNone())
+        {
+            ToolRequiredText->SetText(FText::Format(
+                FText::FromString(TEXT("Ferramenta: {0}")),
+                FText::FromName(CurrentStep.RequiredToolTag)
+            ));
+        }
+        else
+        {
+            // Passo sem ferramenta (feito com as maos): nao mostra nada
+            ToolRequiredText->SetText(FText::GetEmpty());
+        }
     }
 
     // ToolIconImage - você pode mapear tags para ícones num DataTable ou mapa no Blueprint

@@ -91,10 +91,17 @@ const FRepairStep* URepairableComponent::GetActiveStepConst() const
     return nullptr;
 }
 
+// Passo sem ferramenta (Required Tool Tag vazio = None) pode ser feito com a mao livre ou com
+// qualquer item equipado. Passo com tag exige um item equipado que tenha essa tag.
+static bool ItemMatchesToolTag(const FInventoryItem& Item, FName RequiredToolTag)
+{
+    if (RequiredToolTag.IsNone()) return true;
+    return Item.Data && Item.Data->HasTag(RequiredToolTag);
+}
+
 bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
 {
     if (bIsFullyRepaired) return false;
-    if (!Item.Data) return false;
 
     // Se já está reparando, só permite continuar com a mesma ferramenta
     if (bIsRepairing)
@@ -102,7 +109,7 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
         const FRepairStep* ActiveStep = GetActiveStepConst();
         if (ActiveStep)
         {
-            return Item.Data->HasTag(ActiveStep->RequiredToolTag);
+            return ItemMatchesToolTag(Item, ActiveStep->RequiredToolTag);
         }
     }
 
@@ -111,7 +118,7 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
     {
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (Item.Data->HasTag(Step.RequiredToolTag))
+        if (ItemMatchesToolTag(Item, Step.RequiredToolTag))
         {
             return true;
         }
@@ -129,7 +136,7 @@ bool URepairableComponent::UseItem_Implementation(const FInventoryItem& Item, AA
     if (bIsRepairing)
     {
         const FRepairStep* ActiveStep = GetActiveStepConst();
-        if (ActiveStep && Item.Data->HasTag(ActiveStep->RequiredToolTag))
+        if (ActiveStep && ItemMatchesToolTag(Item, ActiveStep->RequiredToolTag))
         {
             CurrentUser = Player;
             return false; // Não consome o item
@@ -142,7 +149,7 @@ bool URepairableComponent::UseItem_Implementation(const FInventoryItem& Item, AA
         FRepairStep& Step = RepairSteps[i];
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (!Item.Data->HasTag(Step.RequiredToolTag)) continue;
+        if (!ItemMatchesToolTag(Item, Step.RequiredToolTag)) continue;
 
         CurrentUser = Player;
         if (BeginStep(Step.StepId))
@@ -201,10 +208,10 @@ void URepairableComponent::UpdateRepairProgress(float DeltaTime)
     }
 
     // Verifica se ainda tem a ferramenta certa equipada
-    if (CurrentUser->Inventory)
+    if (CurrentUser->Inventory && !ActiveStep->RequiredToolTag.IsNone())
     {
         FInventoryItem Equipped;
-        if (!CurrentUser->Inventory->GetEquippedItem(Equipped) || !Equipped.Data || !Equipped.Data->HasTag(ActiveStep->RequiredToolTag))
+        if (!CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesToolTag(Equipped, ActiveStep->RequiredToolTag))
         {
             // Ferramenta errada - para
             if (!ActiveStep->bPersistProgress)
@@ -386,10 +393,10 @@ bool URepairableComponent::BeginStep(FName StepId)
             if (!ArePrerequisitesMet(Step)) return false;
 
             // Verifica ferramenta
-            if (CurrentUser.IsValid() && CurrentUser->Inventory)
+            if (CurrentUser.IsValid() && CurrentUser->Inventory && !Step.RequiredToolTag.IsNone())
             {
                 FInventoryItem Equipped;
-                if (!CurrentUser->Inventory->GetEquippedItem(Equipped) || !Equipped.Data || !Equipped.Data->HasTag(Step.RequiredToolTag))
+                if (!CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesToolTag(Equipped, Step.RequiredToolTag))
                 {
                     return false;
                 }

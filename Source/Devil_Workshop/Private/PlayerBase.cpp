@@ -21,6 +21,8 @@
 #include "InventoryComponent.h"
 #include "InventoryWidget.h"
 #include "ItemUseTarget.h"
+#include "ItemPickup.h"
+#include "BatteryCharger.h"
 #include "RepairPart.h"
 #include "RepairableComponent.h"
 #include "RepairProgressWidget.h"
@@ -340,6 +342,18 @@ void APlayerBase::OnClick()
 		if (!HitActor) break;
 
 		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
+
+		// Pegar item solto no cenario (ex.: bateria nova)
+		if (AItemPickup* Pickup = Cast<AItemPickup>(HitActor))
+		{
+			if (Pickup->TryPickup(this)) return;
+		}
+
+		// Recolher a bateria carregada do carregador
+		if (ABatteryCharger* Charger = Cast<ABatteryCharger>(HitActor))
+		{
+			if (Charger->TryCollect(this)) return;
+		}
 
 		if (Inventory && HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass()))
 		{
@@ -972,8 +986,10 @@ void APlayerBase::TryUseItemOnRepairable()
 {
 	if (!Inventory || !CachedPlayerController || !InspectedObject) return;
 
+	// Mao livre tambem vale: passos sem ferramenta (Required Tool Tag = None) nao exigem item equipado.
+	// Sem item equipado, Equipped fica vazio (Data nula).
 	FInventoryItem Equipped;
-	if (!Inventory->GetEquippedItem(Equipped)) return;
+	Inventory->GetEquippedItem(Equipped);
 
 	// Procura URepairableComponent no objeto inspecionado
 	URepairableComponent* Repairable = InspectedObject->FindComponentByClass<URepairableComponent>();
@@ -1020,18 +1036,16 @@ void APlayerBase::UpdateActiveRepair(float DeltaTime)
 	}
 	else if (Inventory)
 	{
-		FInventoryItem Equipped;
-		if (!Inventory->GetEquippedItem(Equipped) || !Equipped.Data)
+		const int32 ActiveStepIndex = CurrentRepairableComponent->GetActiveStepIndex();
+		if (ActiveStepIndex != INDEX_NONE)
 		{
-			StopRepairInteraction();
-		}
-		else
-		{
-			const int32 ActiveStepIndex = CurrentRepairableComponent->GetActiveStepIndex();
-			if (ActiveStepIndex != INDEX_NONE)
+			const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
+
+			// Passo sem ferramenta (Required Tool Tag = None): nao precisa de item equipado
+			if (!ActiveStep.RequiredToolTag.IsNone())
 			{
-				const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
-				if (!Equipped.Data->HasTag(ActiveStep.RequiredToolTag))
+				FInventoryItem Equipped;
+				if (!Inventory->GetEquippedItem(Equipped) || !Equipped.Data || !Equipped.Data->HasTag(ActiveStep.RequiredToolTag))
 				{
 					StopRepairInteraction();
 				}
