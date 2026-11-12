@@ -93,10 +93,19 @@ const FRepairStep* URepairableComponent::GetActiveStepConst() const
 
 // Passo sem ferramenta (Required Tool Tag vazio = None) pode ser feito com a mao livre ou com
 // qualquer item equipado. Passo com tag exige um item equipado que tenha essa tag.
-static bool ItemMatchesToolTag(const FInventoryItem& Item, FName RequiredToolTag)
+static bool ItemMatchesStepRequirements(const FInventoryItem& Item, const FRepairStep& Step)
 {
-    if (RequiredToolTag.IsNone()) return true;
-    return Item.Data && Item.Data->HasTag(RequiredToolTag);
+    if (!Step.RequiredToolTag.IsNone() && (!Item.Data || !Item.Data->HasTag(Step.RequiredToolTag)))
+    {
+        return false;
+    }
+
+    if (!Step.RequiredItemFlag.IsNone() && !Item.Flags.Contains(Step.RequiredItemFlag))
+    {
+        return false;
+    }
+
+    return true;
 }
 
 bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
@@ -109,7 +118,7 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
         const FRepairStep* ActiveStep = GetActiveStepConst();
         if (ActiveStep)
         {
-            return ItemMatchesToolTag(Item, ActiveStep->RequiredToolTag);
+            return ItemMatchesStepRequirements(Item, *ActiveStep);
         }
     }
 
@@ -118,7 +127,7 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
     {
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (ItemMatchesToolTag(Item, Step.RequiredToolTag))
+        if (ItemMatchesStepRequirements(Item, Step))
         {
             return true;
         }
@@ -136,7 +145,7 @@ bool URepairableComponent::UseItem_Implementation(const FInventoryItem& Item, AA
     if (bIsRepairing)
     {
         const FRepairStep* ActiveStep = GetActiveStepConst();
-        if (ActiveStep && ItemMatchesToolTag(Item, ActiveStep->RequiredToolTag))
+        if (ActiveStep && ItemMatchesStepRequirements(Item, *ActiveStep))
         {
             CurrentUser = Player;
             return false; // Não consome o item
@@ -149,7 +158,7 @@ bool URepairableComponent::UseItem_Implementation(const FInventoryItem& Item, AA
         FRepairStep& Step = RepairSteps[i];
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (!ItemMatchesToolTag(Item, Step.RequiredToolTag)) continue;
+        if (!ItemMatchesStepRequirements(Item, Step)) continue;
 
         CurrentUser = Player;
         if (BeginStep(Step.StepId))
@@ -208,10 +217,10 @@ void URepairableComponent::UpdateRepairProgress(float DeltaTime)
     }
 
     // Verifica se ainda tem a ferramenta certa equipada
-    if (CurrentUser->Inventory && !ActiveStep->RequiredToolTag.IsNone())
+    if (!ActiveStep->RequiredToolTag.IsNone() || !ActiveStep->RequiredItemFlag.IsNone())
     {
         FInventoryItem Equipped;
-        if (!CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesToolTag(Equipped, ActiveStep->RequiredToolTag))
+        if (!CurrentUser->Inventory || !CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesStepRequirements(Equipped, *ActiveStep))
         {
             // Ferramenta errada - para
             if (!ActiveStep->bPersistProgress)
@@ -338,7 +347,7 @@ void URepairableComponent::ResetRepair()
             {
                 if (!Step.MorphTargetName.IsNone())
                 {
-                    SkelMesh->SetMorphTarget(Step.MorphTargetName, 0.0f);
+                    SkelMesh->SetMorphTarget(Step.MorphTargetName, Step.MorphTargetStartValue);
                     SkelMesh->SetMorphTarget(FName(*(Step.MorphTargetName.ToString() + TEXT("_Hide"))), 0.0f);
                 }
             }
@@ -353,7 +362,7 @@ void URepairableComponent::ApplyMorphTarget(const FRepairStep& Step, float Progr
     USkeletalMeshComponent* SkelMesh = GetSkeletalMesh();
     if (SkelMesh)
     {
-        const float Value = FMath::Lerp(0.0f, Step.MorphTargetEndValue, Progress);
+        const float Value = FMath::Lerp(Step.MorphTargetStartValue, Step.MorphTargetEndValue, Progress);
         SkelMesh->SetMorphTarget(Step.MorphTargetName, Value);
     }
     // Para StaticMesh com morph targets, precisaria de uma abordagem diferente (Material Parameter Collection ou Niagara)
@@ -393,10 +402,10 @@ bool URepairableComponent::BeginStep(FName StepId)
             if (!ArePrerequisitesMet(Step)) return false;
 
             // Verifica ferramenta
-            if (CurrentUser.IsValid() && CurrentUser->Inventory && !Step.RequiredToolTag.IsNone())
+            if (!Step.RequiredToolTag.IsNone() || !Step.RequiredItemFlag.IsNone())
             {
                 FInventoryItem Equipped;
-                if (!CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesToolTag(Equipped, Step.RequiredToolTag))
+                if (!CurrentUser.IsValid() || !CurrentUser->Inventory || !CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesStepRequirements(Equipped, Step))
                 {
                     return false;
                 }
@@ -407,6 +416,18 @@ bool URepairableComponent::BeginStep(FName StepId)
             Step.bIsActive = true;
             Step.CurrentProgress = Step.bPersistProgress ? Step.CurrentProgress : 0.0f;
             bIsRepairing = true;
+
+            if (Step.bRestoreHiddenMorphOnStart && !Step.MorphTargetName.IsNone())
+            {
+                if (USkeletalMeshComponent* SkelMesh = GetSkeletalMesh())
+                {
+                    const FName HideMorphName(*(Step.MorphTargetName.ToString() + TEXT("_Hide")));
+                    if (SkelMesh->FindMorphTarget(HideMorphName))
+                    {
+                        SkelMesh->SetMorphTarget(HideMorphName, 0.0f);
+                    }
+                }
+            }
 
             // Aplica morph target inicial
             ApplyMorphTarget(Step, Step.CurrentProgress);
@@ -419,6 +440,13 @@ bool URepairableComponent::BeginStep(FName StepId)
 
             // Broadcast
             OnStepStarted.Broadcast(Step);
+
+            if (Step.bCompleteImmediatelyOnUse)
+            {
+                Step.CurrentProgress = 1.0f;
+                ApplyMorphTarget(Step, 1.0f);
+                CompleteActiveStep();
+            }
 
             UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: Iniciado passo '%s' (%s)"), *GetOwner()->GetName(), *Step.StepId.ToString(), *Step.DisplayName.ToString());
             return true;
@@ -443,7 +471,7 @@ void URepairableComponent::CompleteActiveStep()
 
     // Faz a peça sumir de vez: se o mesh tiver o morph "<NomeDoMorph>_Hide", volta o morph de
     // progresso para 0 e liga o _Hide em 1 (a peça colapsa num ponto, no lugar original).
-    if (!ActiveStep->MorphTargetName.IsNone())
+    if (ActiveStep->bHideMorphOnComplete && !ActiveStep->MorphTargetName.IsNone())
     {
         if (USkeletalMeshComponent* HideSkelMesh = GetSkeletalMesh())
         {
@@ -463,6 +491,15 @@ void URepairableComponent::CompleteActiveStep()
     }
 
     StopWorkLoopSound();
+
+    if (CompletedStep.bConsumeRequiredItemOnComplete && CurrentUser.IsValid() && CurrentUser->Inventory)
+    {
+        FInventoryItem Equipped;
+        if (CurrentUser->Inventory->GetEquippedItem(Equipped) && ItemMatchesStepRequirements(Equipped, CompletedStep))
+        {
+            CurrentUser->Inventory->RemoveItem(Equipped.InstanceId);
+        }
+    }
 
     // Broadcast
     OnStepCompleted.Broadcast(CompletedStep);

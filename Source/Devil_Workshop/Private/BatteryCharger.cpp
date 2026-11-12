@@ -8,6 +8,7 @@
 #include "InventoryComponent.h"
 #include "ItemData.h"
 #include "PlayerBase.h"
+#include "Perception/AISense_Hearing.h"
 
 ABatteryCharger::ABatteryCharger()
 {
@@ -28,6 +29,15 @@ ABatteryCharger::ABatteryCharger()
 	BatteryMesh->SetVisibility(false);
 }
 
+void ABatteryCharger::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// O mesh pode ficar visivel como guia no editor do Blueprint para posicionar a bateria.
+	// Em runtime, ela so aparece quando uma bateria e inserida.
+	BatteryMesh->SetVisibility(false);
+}
+
 bool ABatteryCharger::CanUseItem_Implementation(const FInventoryItem& Item)
 {
 	if (State != EChargerState::Empty) return false;
@@ -45,6 +55,8 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 
 	StoredItemData = Item.Data;
 	ChargeElapsed = 0.0f;
+	NextChargingNoiseTime = FMath::Max(ChargingNoiseInterval, 0.1f);
+	ChargeInstigator = User;
 	State = EChargerState::Charging;
 
 	if (UStaticMesh* Visual = Item.Data->InspectMesh)
@@ -67,6 +79,7 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 
 	SetActorTickEnabled(true);
 	OnChargeStarted.Broadcast();
+	ReportHearingNoise(FName("BatteryCharging"), ChargingNoiseLoudness, ChargingNoiseRange);
 
 	UE_LOG(LogTemp, Warning, TEXT("Carregador '%s': carregando '%s' por %.1f s"), *GetName(), *Item.Data->GetName(), ChargeDuration);
 
@@ -85,6 +98,12 @@ void ABatteryCharger::Tick(float DeltaTime)
 	}
 
 	ChargeElapsed += DeltaTime;
+	if (ChargeElapsed >= NextChargingNoiseTime)
+	{
+		ReportHearingNoise(FName("BatteryCharging"), ChargingNoiseLoudness, ChargingNoiseRange);
+		NextChargingNoiseTime += FMath::Max(ChargingNoiseInterval, 0.1f);
+	}
+
 	if (ChargeElapsed >= ChargeDuration)
 	{
 		FinishCharging();
@@ -106,6 +125,7 @@ void ABatteryCharger::FinishCharging()
 	{
 		UGameplayStatics::PlaySoundAtLocation(this, ChargeCompleteSound, GetActorLocation());
 	}
+	ReportHearingNoise(FName("BatteryCharged"), ChargeCompleteNoiseLoudness, ChargeCompleteNoiseRange);
 
 	OnChargeCompleted.Broadcast();
 
@@ -122,11 +142,26 @@ bool ABatteryCharger::TryCollect(APlayerBase* Player)
 	Player->Inventory->SetItemFlag(NewId, ChargedFlag, true);
 
 	StoredItemData = nullptr;
+	ChargeInstigator.Reset();
 	BatteryMesh->SetVisibility(false);
 	State = EChargerState::Empty;
 
 	UE_LOG(LogTemp, Warning, TEXT("Carregador '%s': bateria carregada devolvida ao jogador"), *GetName());
 	return true;
+}
+
+void ABatteryCharger::ReportHearingNoise(FName EventTag, float Loudness, float MaxRange)
+{
+	if (!GetWorld()) return;
+
+	AActor* InstigatorActor = ChargeInstigator.Get();
+	UAISense_Hearing::ReportNoiseEvent(
+		this,
+		GetActorLocation(),
+		Loudness,
+		InstigatorActor ? InstigatorActor : this,
+		MaxRange,
+		EventTag);
 }
 
 float ABatteryCharger::GetChargeProgress() const

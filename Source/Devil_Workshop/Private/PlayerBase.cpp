@@ -27,6 +27,9 @@
 #include "RepairableComponent.h"
 #include "RepairProgressWidget.h"
 #include "RepairStep.h"
+#include "TaskListBoard.h"
+#include "TaskListWidget.h"
+#include "PrologueCompletedWidget.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -274,7 +277,7 @@ bool APlayerBase::IsMouseNearScreenEdge()
 
 void APlayerBase::OnClick()
 {
-	if (bInventoryOpen) return;
+	if (bInventoryOpen || bTaskListOpen) return;
 
 	bClickHeld = true;
 
@@ -342,6 +345,12 @@ void APlayerBase::OnClick()
 		if (!HitActor) break;
 
 		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
+
+		if (Cast<ATaskListBoard>(HitActor))
+		{
+			ToggleTaskList();
+			return;
+		}
 
 		// Pegar item solto no cenario (ex.: bateria nova)
 		if (AItemPickup* Pickup = Cast<AItemPickup>(HitActor))
@@ -496,7 +505,7 @@ void APlayerBase::OnClickReleased()
 
 void APlayerBase::OnInventoryOpen()
 {
-	if (bInventoryOpen || !Inventory) return;
+	if (bInventoryOpen || bTaskListOpen || !Inventory) return;
 
 	bInventoryOpen = true;
 	bClickHeld = false;
@@ -554,7 +563,15 @@ void APlayerBase::OnGoBack()
 {
 	UE_LOG(LogTemp, Warning, TEXT("OnGoBack chamado | isInspecting = %d | IsTransitioning = %d"), isInspecting ? 1 : 0, IsTransitioning ? 1 : 0);
 
+	if (bIgnoreGoBackUntilReleased) return;
 	if (IsTransitioning || bInventoryOpen) return;
+
+	if (bTaskListOpen)
+	{
+		bIgnoreGoBackUntilReleased = true;
+		ToggleTaskList();
+		return;
+	}
 
 	if (isInspecting)
 	{
@@ -574,6 +591,11 @@ void APlayerBase::OnGoBack()
 	PositionHistory.RemoveAt(PositionHistory.Num() - 1);
 	CurrentAreaActor = nullptr;
 	MoveToPosition(Last);
+}
+
+void APlayerBase::OnGoBackReleased()
+{
+	bIgnoreGoBackUntilReleased = false;
 }
 
 void APlayerBase::MoveToPosition(const FTransform& Target)
@@ -948,6 +970,10 @@ void APlayerBase::OnPause()
 	{
 		OnInventoryClose();
 	}
+	if (bTaskListOpen)
+	{
+		ToggleTaskList();
+	}
 
 	if (!CachedPlayerController) return;
 
@@ -977,6 +1003,37 @@ void APlayerBase::RotatePreviews(float DeltaTime)
 		{
 			Actor->AddActorWorldRotation(FRotator(0.0f, YawDelta, 0.0f));
 		}
+	}
+}
+
+void APlayerBase::ToggleTaskList()
+{
+	if (!CachedPlayerController) return;
+
+	if (!TaskListWidget)
+	{
+		TaskListWidget = CreateWidget<UTaskListWidget>(CachedPlayerController, UTaskListWidget::StaticClass());
+		if (!TaskListWidget) return;
+		TaskListWidget->AddToViewport(50);
+	}
+
+	bTaskListOpen = !bTaskListOpen;
+	TaskListWidget->SetVisibility(bTaskListOpen ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+	if (bTaskListOpen)
+	{
+		bClickHeld = false;
+	}
+}
+
+void APlayerBase::ShowPrologueCompleted()
+{
+	if (bPrologueCompletionStarted || !CachedPlayerController) return;
+	bPrologueCompletionStarted = true;
+
+	PrologueCompletedWidget = CreateWidget<UPrologueCompletedWidget>(CachedPlayerController, UPrologueCompletedWidget::StaticClass());
+	if (PrologueCompletedWidget)
+	{
+		PrologueCompletedWidget->AddToViewport(1000);
 	}
 }
 
@@ -1041,11 +1098,16 @@ void APlayerBase::UpdateActiveRepair(float DeltaTime)
 		{
 			const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
 
-			// Passo sem ferramenta (Required Tool Tag = None): nao precisa de item equipado
-			if (!ActiveStep.RequiredToolTag.IsNone())
+			// Valida a ferramenta e as flags exigidas pelo passo (ex.: bateria Carregada).
+			if (!ActiveStep.RequiredToolTag.IsNone() || !ActiveStep.RequiredItemFlag.IsNone())
 			{
 				FInventoryItem Equipped;
-				if (!Inventory->GetEquippedItem(Equipped) || !Equipped.Data || !Equipped.Data->HasTag(ActiveStep.RequiredToolTag))
+				const bool bHasEquippedItem = Inventory->GetEquippedItem(Equipped);
+				const bool bHasRequiredTag = ActiveStep.RequiredToolTag.IsNone()
+					|| (bHasEquippedItem && Equipped.Data && Equipped.Data->HasTag(ActiveStep.RequiredToolTag));
+				const bool bHasRequiredFlag = ActiveStep.RequiredItemFlag.IsNone()
+					|| (bHasEquippedItem && Equipped.Flags.Contains(ActiveStep.RequiredItemFlag));
+				if (!bHasEquippedItem || !bHasRequiredTag || !bHasRequiredFlag)
 				{
 					StopRepairInteraction();
 				}
@@ -1159,6 +1221,7 @@ void APlayerBase::OnAllRepairsCompleted()
 	}
 
 	StopRepairInteraction();
+	ShowPrologueCompleted();
 
 	// Aqui você pode adicionar lógica extra:
 	// - Trocar mesh do objeto para versão "reparada"
@@ -1187,7 +1250,12 @@ void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponen
 	}
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: ClickAction não atribuída.")); }
 
-	if (GoBackAction) { EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack); }
+	if (GoBackAction)
+	{
+		EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack);
+		EIC->BindAction(GoBackAction, ETriggerEvent::Completed, this, &APlayerBase::OnGoBackReleased);
+		EIC->BindAction(GoBackAction, ETriggerEvent::Canceled, this, &APlayerBase::OnGoBackReleased);
+	}
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: GoBackAction não atribuída.")); }
 
 	if (LookAction) { EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &APlayerBase::OnLook); }

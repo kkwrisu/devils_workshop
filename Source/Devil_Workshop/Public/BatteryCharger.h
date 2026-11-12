@@ -56,6 +56,8 @@ public:
 	FOnChargeCompleted OnChargeCompleted;
 
 protected:
+	virtual void BeginPlay() override;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Componentes")
 	TObjectPtr<UStaticMeshComponent> Mesh;
 
@@ -85,11 +87,29 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Carregador|Audio")
 	TObjectPtr<USoundBase> ChargeCompleteSound;
 
+	UPROPERTY(EditAnywhere, Category = "Carregador|Audio|Ruido", meta = (ClampMin = "0.1"))
+	float ChargingNoiseInterval = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Carregador|Audio|Ruido", meta = (ClampMin = "0.0"))
+	float ChargingNoiseLoudness = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category = "Carregador|Audio|Ruido", meta = (ClampMin = "0.0"))
+	float ChargingNoiseRange = 1400.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Carregador|Audio|Ruido", meta = (ClampMin = "0.0"))
+	float ChargeCompleteNoiseLoudness = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Carregador|Audio|Ruido", meta = (ClampMin = "0.0"))
+	float ChargeCompleteNoiseRange = 2400.0f;
+
 private:
 	void FinishCharging();
+	void ReportHearingNoise(FName EventTag, float Loudness, float MaxRange);
 
 	EChargerState State = EChargerState::Empty;
 	float ChargeElapsed = 0.0f;
+	float NextChargingNoiseTime = 0.0f;
+	TWeakObjectPtr<AActor> ChargeInstigator;
 
 	UPROPERTY()
 	TObjectPtr<UItemData> StoredItemData;

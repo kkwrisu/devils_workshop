@@ -22,6 +22,8 @@ class UMaterialInstanceDynamic;
 class USceneCaptureComponent2D;
 class URepairableComponent;
 class URepairProgressWidget;
+class UTaskListWidget;
+class UPrologueCompletedWidget;
 struct FInputActionValue;
 
 UCLASS(Blueprintable)
@@ -240,6 +242,16 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UInventoryWidget> InventoryWidget;
 
+	UPROPERTY()
+	TObjectPtr<UTaskListWidget> TaskListWidget;
+
+	UPROPERTY()
+	TObjectPtr<UPrologueCompletedWidget> PrologueCompletedWidget;
+
+	bool bTaskListOpen = false;
+	bool bIgnoreGoBackUntilReleased = false;
+	bool bPrologueCompletionStarted = false;
+
 	double LastInventoryScrollTime = -1000.0;
 
 	FVector DefaultCameraRelativeLocation = FVector::ZeroVector;
@@ -317,6 +329,7 @@ protected:
 	void OnInventoryClose();
 	void OnInventoryScroll(const FInputActionValue& Value);
 	void OnGoBack();
+	void OnGoBackReleased();
 	void OnLook(const FInputActionValue& Value);
 	void OnPause();
 
@@ -332,6 +345,8 @@ protected:
 
 	// Preview 3D system
 	void RotatePreviews(float DeltaTime);
+	void ToggleTaskList();
+	void ShowPrologueCompleted();
 
 private:
 	// Preview 3D system
