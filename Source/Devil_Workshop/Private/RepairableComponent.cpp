@@ -11,6 +11,7 @@
 #include "PlayerBase.h"
 #include "InventoryComponent.h"
 #include "InventoryTypes.h"
+#include "ItemData.h"
 
 URepairableComponent::URepairableComponent()
 {
@@ -108,6 +109,26 @@ static bool ItemMatchesStepRequirements(const FInventoryItem& Item, const FRepai
     return true;
 }
 
+static int32 FindInventoryItemInstanceId(const APlayerBase* Player, FName ItemId)
+{
+    if (!Player || !Player->Inventory || ItemId.IsNone()) return INDEX_NONE;
+
+    for (const FInventoryItem& Item : Player->Inventory->GetItems())
+    {
+        if (Item.Data && Item.Data->ItemId == ItemId)
+        {
+            return Item.InstanceId;
+        }
+    }
+
+    return INDEX_NONE;
+}
+
+static bool HasRequiredInventoryItem(const APlayerBase* Player, const FRepairStep& Step)
+{
+    return Step.RequiredItemId.IsNone() || FindInventoryItemInstanceId(Player, Step.RequiredItemId) != INDEX_NONE;
+}
+
 bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
 {
     if (bIsFullyRepaired) return false;
@@ -118,7 +139,7 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
         const FRepairStep* ActiveStep = GetActiveStepConst();
         if (ActiveStep)
         {
-            return ItemMatchesStepRequirements(Item, *ActiveStep);
+            return ItemMatchesStepRequirements(Item, *ActiveStep) && HasRequiredInventoryItem(CurrentUser.Get(), *ActiveStep);
         }
     }
 
@@ -127,7 +148,7 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
     {
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (ItemMatchesStepRequirements(Item, Step))
+        if (ItemMatchesStepRequirements(Item, Step) && HasRequiredInventoryItem(CurrentUser.Get(), Step))
         {
             return true;
         }
@@ -158,7 +179,7 @@ bool URepairableComponent::UseItem_Implementation(const FInventoryItem& Item, AA
         FRepairStep& Step = RepairSteps[i];
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (!ItemMatchesStepRequirements(Item, Step)) continue;
+        if (!ItemMatchesStepRequirements(Item, Step) || !HasRequiredInventoryItem(Player, Step)) continue;
 
         CurrentUser = Player;
         if (BeginStep(Step.StepId))
@@ -400,6 +421,7 @@ bool URepairableComponent::BeginStep(FName StepId)
         {
             if (Step.bIsCompleted) return false;
             if (!ArePrerequisitesMet(Step)) return false;
+            if (!HasRequiredInventoryItem(CurrentUser.Get(), Step)) return false;
 
             // Verifica ferramenta
             if (!Step.RequiredToolTag.IsNone() || !Step.RequiredItemFlag.IsNone())
@@ -494,11 +516,27 @@ void URepairableComponent::CompleteActiveStep()
 
     if (CompletedStep.bConsumeRequiredItemOnComplete && CurrentUser.IsValid() && CurrentUser->Inventory)
     {
-        FInventoryItem Equipped;
-        if (CurrentUser->Inventory->GetEquippedItem(Equipped) && ItemMatchesStepRequirements(Equipped, CompletedStep))
+        if (!CompletedStep.RequiredItemId.IsNone())
         {
-            CurrentUser->Inventory->RemoveItem(Equipped.InstanceId);
+            const int32 RequiredItemInstanceId = FindInventoryItemInstanceId(CurrentUser.Get(), CompletedStep.RequiredItemId);
+            if (RequiredItemInstanceId != INDEX_NONE)
+            {
+                CurrentUser->Inventory->RemoveItem(RequiredItemInstanceId);
+            }
         }
+        else
+        {
+            FInventoryItem Equipped;
+            if (CurrentUser->Inventory->GetEquippedItem(Equipped) && ItemMatchesStepRequirements(Equipped, CompletedStep))
+            {
+                CurrentUser->Inventory->RemoveItem(Equipped.InstanceId);
+            }
+        }
+    }
+
+    if (CompletedStep.ItemGrantedOnComplete && CurrentUser.IsValid() && CurrentUser->Inventory)
+    {
+        CurrentUser->Inventory->AddItem(CompletedStep.ItemGrantedOnComplete);
     }
 
     // Broadcast

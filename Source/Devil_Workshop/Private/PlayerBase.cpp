@@ -1055,7 +1055,10 @@ void APlayerBase::TryUseItemOnRepairable()
 		return;
 	}
 
-	// Verifica se pode usar o item equipado
+	// Define o jogador para que o componente possa validar peças exigidas no inventário.
+	Repairable->StartRepair(this);
+
+	// Verifica se pode usar o item equipado e as peças necessárias no inventário.
 	if (!IItemUseTarget::Execute_CanUseItem(Repairable, Equipped))
 	{
 		return;

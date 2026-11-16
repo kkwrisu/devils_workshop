@@ -7,6 +7,7 @@
 class UParticleSystem;
 class USoundBase;
 class UCurveFloat;
+class UItemData;
 
 /**
  * Define um único passo de reparo (ex.: "Remover parafuso 1", "Abrir painel traseiro").
@@ -37,9 +38,17 @@ struct FRepairStep : public FTableRowBase
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")
     FName RequiredItemFlag;
 
-    /** Consome o item equipado ao concluir este passo (ex.: bateria instalada no radio). */
+    /** ItemId da peça/material que precisa estar no inventário (independente do item equipado). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")
+    FName RequiredItemId;
+
+    /** Consome o item exigido ao concluir: RequiredItemId do inventário ou, se vazio, o item equipado. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")
     bool bConsumeRequiredItemOnComplete = false;
+
+    /** Item adicionado ao inventário quando este passo é concluído (ex.: peça removida do rádio). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Inventário")
+    TObjectPtr<UItemData> ItemGrantedOnComplete;
 
     /** Passos que devem ser completados antes deste (ordem implícita) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")

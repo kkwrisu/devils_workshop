@@ -9,8 +9,6 @@
 #include "Components/VerticalBoxSlot.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
-#include "Materials/MaterialInstanceDynamic.h"
-#include "Materials/Material.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Engine/StaticMeshActor.h"
@@ -23,6 +21,7 @@
 void UInventoryWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	bUse3DPreview = true;
 
 	UE_LOG(LogTemp, Warning, TEXT("InventoryWidget: NativeConstruct | ItemsWrapBox = %d"), ItemsWrapBox ? 1 : 0);
 
@@ -40,6 +39,15 @@ void UInventoryWidget::NativeDestruct()
 	Super::NativeDestruct();
 }
 
+void UInventoryWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+	if (GetVisibility() != ESlateVisibility::Collapsed)
+	{
+		RotatePreviews(InDeltaTime);
+	}
+}
+
 void UInventoryWidget::InitializePreviewSystem()
 {
 	if (!bUse3DPreview || !GetWorld()) return;
@@ -47,7 +55,6 @@ void UInventoryWidget::InitializePreviewSystem()
 	PreviewActors.SetNum(MaxPreviewSlots);
 	PreviewCaptures.SetNum(MaxPreviewSlots);
 	PreviewRenderTargets.SetNum(MaxPreviewSlots);
-	PreviewMaterials.SetNum(MaxPreviewSlots);
 
 	for (int32 i = 0; i < MaxPreviewSlots; ++i)
 	{
@@ -56,7 +63,6 @@ void UInventoryWidget::InitializePreviewSystem()
 		RT->ClearColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.0f);
 		RT->bAutoGenerateMips = false;
 		PreviewRenderTargets[i] = RT;
-		PreviewMaterials[i] = nullptr;
 	}
 }
 
@@ -72,7 +78,6 @@ void UInventoryWidget::ShutdownPreviewSystem()
 	PreviewActors.Empty();
 	PreviewCaptures.Empty();
 	PreviewRenderTargets.Empty();
-	PreviewMaterials.Empty();
 }
 
 UTextureRenderTarget2D* UInventoryWidget::GetOrCreateRenderTarget(int32 SlotIndex)
@@ -84,34 +89,12 @@ UTextureRenderTarget2D* UInventoryWidget::GetOrCreateRenderTarget(int32 SlotInde
 	return nullptr;
 }
 
-void UInventoryWidget::UpdatePreviewMaterial(int32 SlotIndex)
-{
-	if (!PreviewBaseMaterial || SlotIndex < 0 || SlotIndex >= MaxPreviewSlots) return;
-
-	UTextureRenderTarget2D* RT = GetOrCreateRenderTarget(SlotIndex);
-	if (!RT) return;
-
-	if (!PreviewMaterials[SlotIndex])
-	{
-		PreviewMaterials[SlotIndex] = UMaterialInstanceDynamic::Create(PreviewBaseMaterial, this);
-		if (!PreviewMaterials[SlotIndex])
-		{
-			UE_LOG(LogTemp, Warning, TEXT("InventoryWidget: Falha ao criar MaterialInstanceDynamic para slot %d"), SlotIndex);
-			return;
-		}
-	}
-
-	PreviewMaterials[SlotIndex]->SetTextureParameterValue(FName("PreviewTexture"), PreviewRenderTargets[SlotIndex]);
-}
-
 void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 {
 	if (!Mesh || !GetWorld() || SlotIndex < 0 || SlotIndex >= MaxPreviewSlots) return;
 
 	UTextureRenderTarget2D* RT = GetOrCreateRenderTarget(SlotIndex);
 	if (!RT) return;
-
-	UpdatePreviewMaterial(SlotIndex);
 
 	AActor* PreviewActor = PreviewActors[SlotIndex];
 	USceneCaptureComponent2D* Capture = PreviewCaptures[SlotIndex];
@@ -127,7 +110,8 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 
 		if (PreviewActor)
 		{
-			PreviewActor->SetActorHiddenInGame(true);
+			// O ator fica fora da área jogável, mas visível para a SceneCapture.
+			PreviewActor->SetActorHiddenInGame(false);
 			PreviewActor->SetActorEnableCollision(false);
 			PreviewActor->SetActorTickEnabled(false);
 
@@ -137,7 +121,6 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 
 			if (Capture)
 			{
-				Capture->RegisterComponent();
 				Capture->AttachToComponent(PreviewActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
 				Capture->SetRelativeLocation(FVector(150.0f, 0.0f, 0.0f));
 				Capture->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
@@ -147,6 +130,9 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 				Capture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
 				Capture->bCaptureEveryFrame = true;
 				Capture->bCaptureOnMovement = false;
+				Capture->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
+				Capture->ShowOnlyActorComponents(PreviewActor);
+				Capture->RegisterComponent();
 			}
 		}
 	}
@@ -265,6 +251,7 @@ void UInventoryWidget::RebuildItemList()
 	if (!ItemsWrapBox || !Inventory) return;
 
 	ItemsWrapBox->ClearChildren();
+	VisibleItemIndices.Reset();
 
 	const TArray<FInventoryItem>& Items = Inventory->GetItems();
 	for (int32 i = 0; i < Items.Num(); ++i)
@@ -272,6 +259,7 @@ void UInventoryWidget::RebuildItemList()
 		const FInventoryItem& Item = Items[i];
 		if (Item.Data)
 		{
+			VisibleItemIndices.Add(i);
 			UVerticalBox* ItemSlotWidget = CreateItemSlot(Item, i);
 			if (ItemSlotWidget)
 			{
@@ -299,7 +287,7 @@ void UInventoryWidget::ApplyPreviewMaterialsToImages()
 {
 	if (!bUse3DPreview || !ItemsWrapBox) return;
 
-	for (int32 i = 0; i < ItemsWrapBox->GetChildrenCount() && i < MaxPreviewSlots; ++i)
+	for (int32 i = 0; i < ItemsWrapBox->GetChildrenCount() && i < VisibleItemIndices.Num(); ++i)
 	{
 		UWidget* SlotWidget = ItemsWrapBox->GetChildAt(i);
 		if (UVerticalBox* SlotContainer = Cast<UVerticalBox>(SlotWidget))
@@ -310,9 +298,17 @@ void UInventoryWidget::ApplyPreviewMaterialsToImages()
 				{
 					if (UImage* PreviewImage = Cast<UImage>(Border->GetContent()))
 					{
-						if (i < PreviewMaterials.Num() && PreviewMaterials[i])
+						const int32 ItemIndex = VisibleItemIndices[i];
+						if (Inventory && Inventory->GetItems().IsValidIndex(ItemIndex)
+							&& Inventory->GetItems()[ItemIndex].Data
+							&& Inventory->GetItems()[ItemIndex].Data->InspectMesh
+							&& PreviewRenderTargets.IsValidIndex(ItemIndex) && PreviewRenderTargets[ItemIndex])
 						{
-							PreviewImage->SetBrushFromMaterial(PreviewMaterials[i]);
+							FSlateBrush PreviewBrush;
+							PreviewBrush.SetResourceObject(PreviewRenderTargets[ItemIndex]);
+							PreviewBrush.ImageSize = FVector2D(144.0f, 120.0f);
+							PreviewBrush.DrawAs = ESlateBrushDrawType::Image;
+							PreviewImage->SetBrush(PreviewBrush);
 						}
 					}
 				}
@@ -340,7 +336,7 @@ UVerticalBox* UInventoryWidget::CreateItemSlot(const FInventoryItem& Item, int32
 		UImage* PreviewImage = NewObject<UImage>(PreviewBorder, *FString::Printf(TEXT("PreviewImage_%d"), ItemIndex));
 		if (PreviewImage)
 		{
-			PreviewImage->SetDesiredSizeOverride(FVector2D(96.0f, 96.0f));
+			PreviewImage->SetDesiredSizeOverride(FVector2D(144.0f, 120.0f));
 
 			if (Item.Data->Icon)
 			{
