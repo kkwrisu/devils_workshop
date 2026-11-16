@@ -25,7 +25,6 @@
 #include "BatteryCharger.h"
 #include "RepairPart.h"
 #include "RepairableComponent.h"
-#include "RepairProgressWidget.h"
 #include "RepairStep.h"
 #include "TaskListBoard.h"
 #include "TaskListWidget.h"
@@ -179,6 +178,24 @@ void APlayerBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// A lista bloqueia o controle do jogador sem pausar o restante do mundo.
+	if (bTaskListOpen)
+	{
+		if (CachedPlayerController && TaskListWidget)
+		{
+			if (CachedPlayerController->WasInputKeyJustPressed(EKeys::E))
+			{
+				TaskListWidget->ShowControlsPage();
+			}
+			else if (CachedPlayerController->WasInputKeyJustPressed(EKeys::Q))
+			{
+				TaskListWidget->ShowRadioPage();
+			}
+		}
+		bInspectDragging = false;
+		return;
+	}
+
 	MoveTimeline.TickTimeline(DeltaTime);
 	CameraFocusTimeline.TickTimeline(DeltaTime);
 	InspectTimeline.TickTimeline(DeltaTime);
@@ -251,7 +268,7 @@ void APlayerBase::ApplyLookPitchDelta(double Delta)
 
 void APlayerBase::OnLook(const FInputActionValue& Value)
 {
-	if (isInspecting || IsTransitioning || bIsCameraFocused || bInventoryOpen) return;
+	if (isInspecting || IsTransitioning || bIsCameraFocused || bInventoryOpen || bTaskListOpen) return;
 
 	const double Dt = GetWorld()->GetDeltaSeconds();
 	LookYawOffset = FMath::Clamp(LookYawOffset + static_cast<double>(Value.Get<float>()) * Dt * 60.0, -YawLimit, YawLimit);
@@ -564,7 +581,6 @@ void APlayerBase::OnGoBack()
 	UE_LOG(LogTemp, Warning, TEXT("OnGoBack chamado | isInspecting = %d | IsTransitioning = %d"), isInspecting ? 1 : 0, IsTransitioning ? 1 : 0);
 
 	if (bIgnoreGoBackUntilReleased) return;
-	if (IsTransitioning || bInventoryOpen) return;
 
 	if (bTaskListOpen)
 	{
@@ -572,6 +588,7 @@ void APlayerBase::OnGoBack()
 		ToggleTaskList();
 		return;
 	}
+	if (IsTransitioning || bInventoryOpen) return;
 
 	if (isInspecting)
 	{
@@ -966,6 +983,8 @@ void APlayerBase::ClearInspectionBlur()
 
 void APlayerBase::OnPause()
 {
+	if (bTaskListOpen) return;
+
 	if (bInventoryOpen)
 	{
 		OnInventoryClose();
@@ -1008,20 +1027,74 @@ void APlayerBase::RotatePreviews(float DeltaTime)
 
 void APlayerBase::ToggleTaskList()
 {
-	if (!CachedPlayerController) return;
+	if (!CachedPlayerController)
+	{
+		UE_LOG(LogTemp, Error, TEXT("TaskList: nao abriu; CachedPlayerController esta nulo."));
+		return;
+	}
+
+	const bool bOpening = !bTaskListOpen;
+	TArray<FRepairStep> ChecklistSteps;
+	if (bOpening)
+	{
+		TArray<AActor*> Actors;
+		UGameplayStatics::GetAllActorsOfClass(this, AActor::StaticClass(), Actors);
+		for (AActor* Actor : Actors)
+		{
+			if (!Actor) continue;
+			URepairableComponent* Repairable = Actor->FindComponentByClass<URepairableComponent>();
+			if (!Repairable || Repairable->RepairSteps.Num() == 0) continue;
+
+			const bool bLooksLikeRadioRepair = Repairable->RepairSteps.ContainsByPredicate([](const FRepairStep& Step)
+			{
+				return Step.StepId.ToString().Contains(TEXT("Screw"))
+					|| Step.StepId.ToString().Contains(TEXT("Battery"));
+			});
+			if (bLooksLikeRadioRepair)
+			{
+				ChecklistSteps = Repairable->RepairSteps;
+				break;
+			}
+		}
+	}
 
 	if (!TaskListWidget)
 	{
 		TaskListWidget = CreateWidget<UTaskListWidget>(CachedPlayerController, UTaskListWidget::StaticClass());
-		if (!TaskListWidget) return;
-		TaskListWidget->AddToViewport(50);
+		if (!TaskListWidget)
+		{
+			UE_LOG(LogTemp, Error, TEXT("TaskList: CreateWidget falhou."));
+			return;
+		}
+		TaskListWidget->InitializeChecklist(ChecklistSteps);
+		TaskListWidget->OnCloseRequested.AddDynamic(this, &APlayerBase::OnTaskListCloseRequested);
+		UE_LOG(LogTemp, Warning, TEXT("TaskList: widget criado: %s"), *GetNameSafe(TaskListWidget));
+		TaskListWidget->AddToViewport(100);
+		UE_LOG(LogTemp, Warning, TEXT("TaskList: widget adicionado ao viewport."));
+	}
+	else if (bOpening)
+	{
+		TaskListWidget->InitializeChecklist(ChecklistSteps);
 	}
 
 	bTaskListOpen = !bTaskListOpen;
 	TaskListWidget->SetVisibility(bTaskListOpen ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+	TaskListWidget->SetRenderOpacity(1.0f);
+	UE_LOG(LogTemp, Warning, TEXT("TaskList: %s; visibilidade=%s; viewport=%d"),
+		bTaskListOpen ? TEXT("aberta") : TEXT("fechada"),
+		TaskListWidget->GetVisibility() == ESlateVisibility::Visible ? TEXT("Visible") : TEXT("Collapsed"),
+		TaskListWidget->IsInViewport() ? 1 : 0);
 	if (bTaskListOpen)
 	{
 		bClickHeld = false;
+	}
+}
+
+void APlayerBase::OnTaskListCloseRequested()
+{
+	if (bTaskListOpen)
+	{
+		ToggleTaskList();
 	}
 }
 
@@ -1075,18 +1148,17 @@ void APlayerBase::UpdateActiveRepair(float DeltaTime)
 {
 	if (!CurrentRepairableComponent || !bIsActivelyRepairing) return;
 
-	// Atualiza progresso do componente de reparo
-	CurrentRepairableComponent->UpdateRepairProgress(DeltaTime);
+	// Guardamos o componente atual: UpdateRepairProgress pode concluir a última etapa e
+	// disparar OnAllRepairsCompleted, cujo callback encerra a interação e limpa o membro.
+	URepairableComponent* RepairableBeingUpdated = CurrentRepairableComponent;
 
-	// Atualiza widget de progresso
-	if (RepairProgressWidget)
+	// Atualiza progresso do componente de reparo
+	RepairableBeingUpdated->UpdateRepairProgress(DeltaTime);
+
+	// A conclusão pode ter encerrado a interação de forma síncrona dentro da chamada acima.
+	if (!bIsActivelyRepairing || CurrentRepairableComponent != RepairableBeingUpdated)
 	{
-		const int32 ActiveStepIndex = CurrentRepairableComponent->GetActiveStepIndex();
-		if (ActiveStepIndex != INDEX_NONE)
-		{
-			const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
-			RepairProgressWidget->UpdateProgress(ActiveStep.CurrentProgress);
-		}
+		return;
 	}
 
 	// Verifica se o jogador soltou o clique ou trocou de ferramenta
@@ -1102,7 +1174,9 @@ void APlayerBase::UpdateActiveRepair(float DeltaTime)
 			const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
 
 			// Valida a ferramenta e as flags exigidas pelo passo (ex.: bateria Carregada).
-			if (!ActiveStep.RequiredToolTag.IsNone() || !ActiveStep.RequiredItemFlag.IsNone())
+			if (!ActiveStep.RequiredToolTag.IsNone()
+				|| !ActiveStep.RequiredItemFlag.IsNone()
+				|| !ActiveStep.RequiredSelectedItemId.IsNone())
 			{
 				FInventoryItem Equipped;
 				const bool bHasEquippedItem = Inventory->GetEquippedItem(Equipped);
@@ -1110,7 +1184,9 @@ void APlayerBase::UpdateActiveRepair(float DeltaTime)
 					|| (bHasEquippedItem && Equipped.Data && Equipped.Data->HasTag(ActiveStep.RequiredToolTag));
 				const bool bHasRequiredFlag = ActiveStep.RequiredItemFlag.IsNone()
 					|| (bHasEquippedItem && Equipped.Flags.Contains(ActiveStep.RequiredItemFlag));
-				if (!bHasEquippedItem || !bHasRequiredTag || !bHasRequiredFlag)
+				const bool bHasRequiredSelectedItem = ActiveStep.RequiredSelectedItemId.IsNone()
+					|| (bHasEquippedItem && Equipped.Data && Equipped.Data->ItemId == ActiveStep.RequiredSelectedItemId);
+				if (!bHasEquippedItem || !bHasRequiredTag || !bHasRequiredFlag || !bHasRequiredSelectedItem)
 				{
 					StopRepairInteraction();
 				}
@@ -1126,24 +1202,9 @@ void APlayerBase::StartRepairInteraction(URepairableComponent* Repairable)
 	CurrentRepairableComponent = Repairable;
 	bIsActivelyRepairing = true;
 
-	// Cria/mostra widget de progresso
-	if (RepairProgressWidgetClass && !RepairProgressWidget)
-	{
-		if (APlayerController* PC = Cast<APlayerController>(GetController()))
-		{
-			RepairProgressWidget = CreateWidget<URepairProgressWidget>(PC, RepairProgressWidgetClass);
-			if (RepairProgressWidget)
-			{
-				RepairProgressWidget->AddToViewport(5); // Acima do inventário
-			}
-		}
-	}
-
 	// Bind delegates
 	if (CurrentRepairableComponent)
 	{
-		CurrentRepairableComponent->OnStepStarted.AddDynamic(this, &APlayerBase::OnRepairStepStarted);
-		CurrentRepairableComponent->OnStepProgress.AddDynamic(this, &APlayerBase::OnRepairStepProgress);
 		CurrentRepairableComponent->OnStepCompleted.AddDynamic(this, &APlayerBase::OnRepairStepCompleted);
 		CurrentRepairableComponent->OnAllRepairsCompleted.AddDynamic(this, &APlayerBase::OnAllRepairsCompleted);
 	}
@@ -1162,17 +1223,8 @@ void APlayerBase::StopRepairInteraction()
 	{
 		CurrentRepairableComponent->StopRepair();
 
-		CurrentRepairableComponent->OnStepStarted.RemoveDynamic(this, &APlayerBase::OnRepairStepStarted);
-		CurrentRepairableComponent->OnStepProgress.RemoveDynamic(this, &APlayerBase::OnRepairStepProgress);
 		CurrentRepairableComponent->OnStepCompleted.RemoveDynamic(this, &APlayerBase::OnRepairStepCompleted);
 		CurrentRepairableComponent->OnAllRepairsCompleted.RemoveDynamic(this, &APlayerBase::OnAllRepairsCompleted);
-	}
-
-	// Esconde widget
-	if (RepairProgressWidget)
-	{
-		RepairProgressWidget->Hide();
-		RepairProgressWidget = nullptr;
 	}
 
 	CurrentRepairableComponent = nullptr;
@@ -1180,27 +1232,13 @@ void APlayerBase::StopRepairInteraction()
 	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Reparo interrompido"));
 }
 
-void APlayerBase::OnRepairStepStarted(const FRepairStep& Step)
-{
-	if (RepairProgressWidget)
-	{
-		RepairProgressWidget->SetStep(Step);
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Passo de reparo iniciado: %s"), *Step.StepId.ToString());
-}
-
-void APlayerBase::OnRepairStepProgress(const FRepairStep& Step, float Progress)
-{
-	if (RepairProgressWidget)
-	{
-		RepairProgressWidget->UpdateProgress(Progress);
-	}
-}
-
 void APlayerBase::OnRepairStepCompleted(const FRepairStep& Step)
 {
 	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Passo de reparo completado: %s"), *Step.StepId.ToString());
+	if (TaskListWidget)
+	{
+		TaskListWidget->MarkStepCompleted(Step.StepId);
+	}
 
 	// O widget continua mostrando o progresso até o próximo passo ser iniciado
 	// O próximo passo só inicia quando o jogador clica novamente com a ferramenta certa
@@ -1209,19 +1247,6 @@ void APlayerBase::OnRepairStepCompleted(const FRepairStep& Step)
 void APlayerBase::OnAllRepairsCompleted()
 {
 	UE_LOG(LogTemp, Log, TEXT("PlayerBase: TODOS OS REPAROS COMPLETOS em '%s'!"), *InspectedObject->GetName());
-
-	// Esconde widget após um delay
-	if (RepairProgressWidget)
-	{
-		FTimerHandle TimerHandle;
-		GetWorldTimerManager().SetTimer(TimerHandle, [this]()
-			{
-				if (RepairProgressWidget)
-				{
-					RepairProgressWidget->Hide();
-				}
-			}, 2.0f, false);
-	}
 
 	StopRepairInteraction();
 	ShowPrologueCompleted();

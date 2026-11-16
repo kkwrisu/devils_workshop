@@ -21,7 +21,6 @@ class UTextureRenderTarget2D;
 class UMaterialInstanceDynamic;
 class USceneCaptureComponent2D;
 class URepairableComponent;
-class URepairProgressWidget;
 class UTaskListWidget;
 class UPrologueCompletedWidget;
 struct FInputActionValue;
@@ -175,12 +174,6 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	bool bBlurBackground = true;
 
-	UPROPERTY(EditDefaultsOnly, Category = "Reparo|UI")
-	TSubclassOf<UUserWidget> RepairProgressWidgetClass;
-
-	UPROPERTY()
-	TObjectPtr<URepairProgressWidget> RepairProgressWidget;
-
 	UPROPERTY()
 	TObjectPtr<URepairableComponent> CurrentRepairableComponent;
 
@@ -321,9 +314,9 @@ protected:
 	void UpdateActiveRepair(float DeltaTime);
 	void StartRepairInteraction(URepairableComponent* Repairable);
 	void StopRepairInteraction();
-	void OnRepairStepStarted(const FRepairStep& Step);
-	void OnRepairStepProgress(const FRepairStep& Step, float Progress);
+	UFUNCTION()
 	void OnRepairStepCompleted(const FRepairStep& Step);
+	UFUNCTION()
 	void OnAllRepairsCompleted();
 	void OnInventoryOpen();
 	void OnInventoryClose();
@@ -346,6 +339,8 @@ protected:
 	// Preview 3D system
 	void RotatePreviews(float DeltaTime);
 	void ToggleTaskList();
+	UFUNCTION()
+	void OnTaskListCloseRequested();
 	void ShowPrologueCompleted();
 
 private:

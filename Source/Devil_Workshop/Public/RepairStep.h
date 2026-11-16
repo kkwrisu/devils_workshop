@@ -42,6 +42,14 @@ struct FRepairStep : public FTableRowBase
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")
     FName RequiredItemId;
 
+    /** ItemId que precisa estar selecionado para iniciar o passo (ex.: parafuso ou painel instalado). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")
+    FName RequiredSelectedItemId;
+
+    /** ItemId de uma ferramenta-chave que precisa estar no inventário, sem precisar estar selecionada. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")
+    FName RequiredInventoryToolItemId;
+
     /** Consome o item exigido ao concluir: RequiredItemId do inventário ou, se vazio, o item equipado. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Requisitos")
     bool bConsumeRequiredItemOnComplete = false;

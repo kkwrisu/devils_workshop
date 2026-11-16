@@ -106,6 +106,12 @@ static bool ItemMatchesStepRequirements(const FInventoryItem& Item, const FRepai
         return false;
     }
 
+    if (!Step.RequiredSelectedItemId.IsNone()
+        && (!Item.Data || Item.Data->ItemId != Step.RequiredSelectedItemId))
+    {
+        return false;
+    }
+
     return true;
 }
 
@@ -129,6 +135,12 @@ static bool HasRequiredInventoryItem(const APlayerBase* Player, const FRepairSte
     return Step.RequiredItemId.IsNone() || FindInventoryItemInstanceId(Player, Step.RequiredItemId) != INDEX_NONE;
 }
 
+static bool HasRequiredInventoryTool(const APlayerBase* Player, const FRepairStep& Step)
+{
+    return Step.RequiredInventoryToolItemId.IsNone()
+        || FindInventoryItemInstanceId(Player, Step.RequiredInventoryToolItemId) != INDEX_NONE;
+}
+
 bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
 {
     if (bIsFullyRepaired) return false;
@@ -139,7 +151,9 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
         const FRepairStep* ActiveStep = GetActiveStepConst();
         if (ActiveStep)
         {
-            return ItemMatchesStepRequirements(Item, *ActiveStep) && HasRequiredInventoryItem(CurrentUser.Get(), *ActiveStep);
+            return ItemMatchesStepRequirements(Item, *ActiveStep)
+                && HasRequiredInventoryItem(CurrentUser.Get(), *ActiveStep)
+                && HasRequiredInventoryTool(CurrentUser.Get(), *ActiveStep);
         }
     }
 
@@ -148,7 +162,9 @@ bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
     {
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (ItemMatchesStepRequirements(Item, Step) && HasRequiredInventoryItem(CurrentUser.Get(), Step))
+        if (ItemMatchesStepRequirements(Item, Step)
+            && HasRequiredInventoryItem(CurrentUser.Get(), Step)
+            && HasRequiredInventoryTool(CurrentUser.Get(), Step))
         {
             return true;
         }
@@ -179,7 +195,9 @@ bool URepairableComponent::UseItem_Implementation(const FInventoryItem& Item, AA
         FRepairStep& Step = RepairSteps[i];
         if (Step.bIsCompleted) continue;
         if (!ArePrerequisitesMet(Step)) continue;
-        if (!ItemMatchesStepRequirements(Item, Step) || !HasRequiredInventoryItem(Player, Step)) continue;
+        if (!ItemMatchesStepRequirements(Item, Step)
+            || !HasRequiredInventoryItem(Player, Step)
+            || !HasRequiredInventoryTool(Player, Step)) continue;
 
         CurrentUser = Player;
         if (BeginStep(Step.StepId))
@@ -238,7 +256,9 @@ void URepairableComponent::UpdateRepairProgress(float DeltaTime)
     }
 
     // Verifica se ainda tem a ferramenta certa equipada
-    if (!ActiveStep->RequiredToolTag.IsNone() || !ActiveStep->RequiredItemFlag.IsNone())
+    if (!ActiveStep->RequiredToolTag.IsNone()
+        || !ActiveStep->RequiredItemFlag.IsNone()
+        || !ActiveStep->RequiredSelectedItemId.IsNone())
     {
         FInventoryItem Equipped;
         if (!CurrentUser->Inventory || !CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesStepRequirements(Equipped, *ActiveStep))
@@ -422,9 +442,12 @@ bool URepairableComponent::BeginStep(FName StepId)
             if (Step.bIsCompleted) return false;
             if (!ArePrerequisitesMet(Step)) return false;
             if (!HasRequiredInventoryItem(CurrentUser.Get(), Step)) return false;
+            if (!HasRequiredInventoryTool(CurrentUser.Get(), Step)) return false;
 
             // Verifica ferramenta
-            if (!Step.RequiredToolTag.IsNone() || !Step.RequiredItemFlag.IsNone())
+            if (!Step.RequiredToolTag.IsNone()
+                || !Step.RequiredItemFlag.IsNone()
+                || !Step.RequiredSelectedItemId.IsNone())
             {
                 FInventoryItem Equipped;
                 if (!CurrentUser.IsValid() || !CurrentUser->Inventory || !CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesStepRequirements(Equipped, Step))
@@ -563,6 +586,19 @@ void URepairableComponent::AdvanceToNextStep()
         // Próximo passo encontrado - mas NÃO inicia automaticamente
         // Espera o jogador clicar novamente com a ferramenta certa
         UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: Próximo passo disponível: '%s' (requer %s)"), *GetOwner()->GetName(), *Step.StepId.ToString(), *Step.RequiredToolTag.ToString());
+        return;
+    }
+
+    // Não declare o reparo concluído se ainda houver etapas incompletas, por exemplo,
+    // devido a um pré-requisito configurado incorretamente na DataTable.
+    const FRepairStep* PendingStep = RepairSteps.FindByPredicate([](const FRepairStep& Step)
+    {
+        return !Step.bIsCompleted;
+    });
+    if (PendingStep)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: Ainda há etapas incompletas; reparo não será finalizado. Etapa pendente: '%s'"),
+            *GetOwner()->GetName(), *PendingStep->StepId.ToString());
         return;
     }
 
