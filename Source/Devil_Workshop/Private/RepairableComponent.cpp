@@ -1,0 +1,677 @@
+#include "RepairableComponent.h"
+
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Components/AudioComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
+#include "Particles/ParticleSystem.h"
+#include "Particles/ParticleSystemComponent.h"
+#include "Engine/DataTable.h"
+#include "PlayerBase.h"
+#include "InventoryComponent.h"
+#include "InventoryTypes.h"
+#include "ItemData.h"
+
+URepairableComponent::URepairableComponent()
+{
+    PrimaryComponentTick.bCanEverTick = false; // Atualizado manualmente via UpdateRepairProgress
+}
+
+void URepairableComponent::BeginPlay()
+{
+    Super::BeginPlay();
+
+    if (bLoadFromDataTable && RepairStepsDataTable)
+    {
+        LoadStepsFromDataTable();
+    }
+
+    // Validação básica
+    if (RepairSteps.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: Nenhum passo de reparo configurado!"), *GetOwner()->GetName());
+    }
+
+    // Cache do mesh para morph targets
+    if (!TargetMeshComponent)
+    {
+        // Tenta achar automaticamente
+        TargetMeshComponent = GetOwner()->FindComponentByClass<USkeletalMeshComponent>();
+        if (!TargetMeshComponent)
+        {
+            TargetMeshComponent = GetOwner()->FindComponentByClass<UStaticMeshComponent>();
+        }
+    }
+}
+
+void URepairableComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    StopRepair();
+    Super::EndPlay(EndPlayReason);
+}
+
+void URepairableComponent::LoadStepsFromDataTable()
+{
+    if (!RepairStepsDataTable) return;
+
+    TArray<FRepairStep*> OutRows;
+    RepairStepsDataTable->GetAllRows<FRepairStep>(TEXT(""), OutRows);
+
+    RepairSteps.Reset();
+    RepairSteps.Reserve(OutRows.Num());
+
+    for (FRepairStep* Row : OutRows)
+    {
+        if (Row)
+        {
+            RepairSteps.Add(*Row);
+        }
+    }
+
+    // Ordena por StepId se quiser (opcional, DataTable já vem ordenado)
+    UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: Carregados %d passos do DataTable"), *GetOwner()->GetName(), RepairSteps.Num());
+}
+
+// Helper: obtém referência ao passo ativo (com verificação)
+FRepairStep* URepairableComponent::GetActiveStepMutable()
+{
+    if (ActiveStepIndex != INDEX_NONE && RepairSteps.IsValidIndex(ActiveStepIndex))
+    {
+        return &RepairSteps[ActiveStepIndex];
+    }
+    return nullptr;
+}
+
+const FRepairStep* URepairableComponent::GetActiveStepConst() const
+{
+    if (ActiveStepIndex != INDEX_NONE && RepairSteps.IsValidIndex(ActiveStepIndex))
+    {
+        return &RepairSteps[ActiveStepIndex];
+    }
+    return nullptr;
+}
+
+// Passo sem ferramenta (Required Tool Tag vazio = None) pode ser feito com a mao livre ou com
+// qualquer item equipado. Passo com tag exige um item equipado que tenha essa tag.
+static bool ItemMatchesStepRequirements(const FInventoryItem& Item, const FRepairStep& Step)
+{
+    if (!Step.RequiredToolTag.IsNone() && (!Item.Data || !Item.Data->HasTag(Step.RequiredToolTag)))
+    {
+        return false;
+    }
+
+    if (!Step.RequiredItemFlag.IsNone() && !Item.Flags.Contains(Step.RequiredItemFlag))
+    {
+        return false;
+    }
+
+    if (!Step.RequiredSelectedItemId.IsNone()
+        && (!Item.Data || Item.Data->ItemId != Step.RequiredSelectedItemId))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static int32 FindInventoryItemInstanceId(const APlayerBase* Player, FName ItemId)
+{
+    if (!Player || !Player->Inventory || ItemId.IsNone()) return INDEX_NONE;
+
+    for (const FInventoryItem& Item : Player->Inventory->GetItems())
+    {
+        if (Item.Data && Item.Data->ItemId == ItemId)
+        {
+            return Item.InstanceId;
+        }
+    }
+
+    return INDEX_NONE;
+}
+
+static bool HasRequiredInventoryItem(const APlayerBase* Player, const FRepairStep& Step)
+{
+    return Step.RequiredItemId.IsNone() || FindInventoryItemInstanceId(Player, Step.RequiredItemId) != INDEX_NONE;
+}
+
+static bool HasRequiredInventoryTool(const APlayerBase* Player, const FRepairStep& Step)
+{
+    return Step.RequiredInventoryToolItemId.IsNone()
+        || FindInventoryItemInstanceId(Player, Step.RequiredInventoryToolItemId) != INDEX_NONE;
+}
+
+bool URepairableComponent::CanUseItem_Implementation(const FInventoryItem& Item)
+{
+    if (bIsFullyRepaired) return false;
+
+    // Se já está reparando, só permite continuar com a mesma ferramenta
+    if (bIsRepairing)
+    {
+        const FRepairStep* ActiveStep = GetActiveStepConst();
+        if (ActiveStep)
+        {
+            return ItemMatchesStepRequirements(Item, *ActiveStep)
+                && HasRequiredInventoryItem(CurrentUser.Get(), *ActiveStep)
+                && HasRequiredInventoryTool(CurrentUser.Get(), *ActiveStep);
+        }
+    }
+
+    // Se não está reparando, verifica se há algum passo disponível para esta ferramenta
+    for (const FRepairStep& Step : RepairSteps)
+    {
+        if (Step.bIsCompleted) continue;
+        if (!ArePrerequisitesMet(Step)) continue;
+        if (ItemMatchesStepRequirements(Item, Step)
+            && HasRequiredInventoryItem(CurrentUser.Get(), Step)
+            && HasRequiredInventoryTool(CurrentUser.Get(), Step))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool URepairableComponent::UseItem_Implementation(const FInventoryItem& Item, AActor* User)
+{
+    APlayerBase* Player = Cast<APlayerBase>(User);
+    if (!Player) return false;
+
+    // Se já está reparando com este passo, apenas continua (o Tick do player vai chamar UpdateRepairProgress)
+    if (bIsRepairing)
+    {
+        const FRepairStep* ActiveStep = GetActiveStepConst();
+        if (ActiveStep && ItemMatchesStepRequirements(Item, *ActiveStep))
+        {
+            CurrentUser = Player;
+            return false; // Não consome o item
+        }
+    }
+
+    // Tenta iniciar um novo passo compatível
+    for (int32 i = 0; i < RepairSteps.Num(); ++i)
+    {
+        FRepairStep& Step = RepairSteps[i];
+        if (Step.bIsCompleted) continue;
+        if (!ArePrerequisitesMet(Step)) continue;
+        if (!ItemMatchesStepRequirements(Item, Step)
+            || !HasRequiredInventoryItem(Player, Step)
+            || !HasRequiredInventoryTool(Player, Step)) continue;
+
+        CurrentUser = Player;
+        if (BeginStep(Step.StepId))
+        {
+            return false; // Não consome o item
+        }
+    }
+
+    return false;
+}
+
+void URepairableComponent::StartRepair(AActor* User)
+{
+    APlayerBase* Player = Cast<APlayerBase>(User);
+    if (!Player) return;
+
+    if (bIsFullyRepaired) return;
+    if (bIsRepairing) return; // Já está reparando
+
+    CurrentUser = Player;
+    // Não inicia passo automaticamente - espera UseItem (clique do jogador)
+    // Isso permite que o jogador escolha qual ferramenta usar se houver múltiplas opções
+}
+
+void URepairableComponent::StopRepair()
+{
+    FRepairStep* ActiveStep = GetActiveStepMutable();
+    if (ActiveStep)
+    {
+        StopWorkLoopSound();
+    }
+
+    bIsRepairing = false;
+    ActiveStepIndex = INDEX_NONE;
+    CurrentUser.Reset();
+}
+
+void URepairableComponent::UpdateRepairProgress(float DeltaTime)
+{
+    if (!bIsRepairing || !CurrentUser.IsValid()) return;
+
+    FRepairStep* ActiveStep = GetActiveStepMutable();
+    if (!ActiveStep) return;
+
+    // Verifica se o jogador ainda está segurando o clique
+    if (!CurrentUser->IsClickHeld())
+    {
+        // Jogador soltou - para o progresso (ou persiste se configurado)
+        if (!ActiveStep->bPersistProgress)
+        {
+            ActiveStep->CurrentProgress = 0.0f;
+            ApplyMorphTarget(*ActiveStep, 0.0f);
+        }
+        StopWorkLoopSound();
+        return;
+    }
+
+    // Verifica se ainda tem a ferramenta certa equipada
+    if (!ActiveStep->RequiredToolTag.IsNone()
+        || !ActiveStep->RequiredItemFlag.IsNone()
+        || !ActiveStep->RequiredSelectedItemId.IsNone())
+    {
+        FInventoryItem Equipped;
+        if (!CurrentUser->Inventory || !CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesStepRequirements(Equipped, *ActiveStep))
+        {
+            // Ferramenta errada - para
+            if (!ActiveStep->bPersistProgress)
+            {
+                ActiveStep->CurrentProgress = 0.0f;
+                ApplyMorphTarget(*ActiveStep, 0.0f);
+            }
+            StopWorkLoopSound();
+            return;
+        }
+    }
+
+    // Avança progresso
+    const float PrevProgress = ActiveStep->CurrentProgress;
+    ActiveStep->CurrentProgress = FMath::Min(1.0f, ActiveStep->CurrentProgress + DeltaTime / ActiveStep->WorkDuration);
+
+    // Aplica curva de progresso visual se houver
+    float VisualProgress = ActiveStep->CurrentProgress;
+    if (ActiveStep->ProgressCurve)
+    {
+        VisualProgress = ActiveStep->ProgressCurve->GetFloatValue(ActiveStep->CurrentProgress);
+    }
+
+    // Aplica morph target
+    ApplyMorphTarget(*ActiveStep, VisualProgress);
+
+    // Inicia som de loop se não estiver tocando
+    if (PrevProgress == 0.0f && ActiveStep->CurrentProgress > 0.0f)
+    {
+        PlayWorkLoopSound(*ActiveStep);
+    }
+
+    // Broadcast progresso
+    OnStepProgress.Broadcast(*ActiveStep, ActiveStep->CurrentProgress);
+
+    // Verifica conclusão
+    if (ActiveStep->CurrentProgress >= 1.0f)
+    {
+        CompleteActiveStep();
+    }
+}
+
+void URepairableComponent::ForceCompleteCurrentStep()
+{
+    FRepairStep* ActiveStep = GetActiveStepMutable();
+    if (ActiveStep)
+    {
+        ActiveStep->CurrentProgress = 1.0f;
+        ApplyMorphTarget(*ActiveStep, 1.0f);
+        CompleteActiveStep();
+    }
+}
+
+bool URepairableComponent::CanStartStep(FName StepId) const
+{
+    for (const FRepairStep& Step : RepairSteps)
+    {
+        if (Step.StepId == StepId)
+        {
+            if (Step.bIsCompleted) return false;
+            return ArePrerequisitesMet(Step);
+        }
+    }
+    return false;
+}
+
+int32 URepairableComponent::GetActiveStepIndex() const
+{
+    return ActiveStepIndex;
+}
+
+int32 URepairableComponent::GetNextAvailableStepIndex() const
+{
+    for (int32 i = 0; i < RepairSteps.Num(); ++i)
+    {
+        const FRepairStep& Step = RepairSteps[i];
+        if (Step.bIsCompleted) continue;
+        if (ArePrerequisitesMet(Step))
+        {
+            return i;
+        }
+    }
+    return INDEX_NONE;
+}
+
+const FRepairStep& URepairableComponent::GetActiveStep() const
+{
+    static FRepairStep EmptyStep;
+    const FRepairStep* ActiveStep = GetActiveStepConst();
+    return ActiveStep ? *ActiveStep : EmptyStep;
+}
+
+const FRepairStep& URepairableComponent::GetNextAvailableStep() const
+{
+    static FRepairStep EmptyStep;
+    const int32 NextIndex = GetNextAvailableStepIndex();
+    if (NextIndex != INDEX_NONE && RepairSteps.IsValidIndex(NextIndex))
+    {
+        return RepairSteps[NextIndex];
+    }
+    return EmptyStep;
+}
+
+void URepairableComponent::ResetRepair()
+{
+    StopRepair();
+
+    for (FRepairStep& Step : RepairSteps)
+    {
+        Step.CurrentProgress = 0.0f;
+        Step.bIsCompleted = false;
+        Step.bIsActive = false;
+    }
+
+    bIsFullyRepaired = false;
+
+    // Reset morph targets
+    if (TargetMeshComponent)
+    {
+        USkeletalMeshComponent* SkelMesh = GetSkeletalMesh();
+        if (SkelMesh)
+        {
+            for (const FRepairStep& Step : RepairSteps)
+            {
+                if (!Step.MorphTargetName.IsNone())
+                {
+                    SkelMesh->SetMorphTarget(Step.MorphTargetName, Step.MorphTargetStartValue);
+                    SkelMesh->SetMorphTarget(FName(*(Step.MorphTargetName.ToString() + TEXT("_Hide"))), 0.0f);
+                }
+            }
+        }
+    }
+}
+
+void URepairableComponent::ApplyMorphTarget(const FRepairStep& Step, float Progress)
+{
+    if (Step.MorphTargetName.IsNone()) return;
+
+    USkeletalMeshComponent* SkelMesh = GetSkeletalMesh();
+    if (SkelMesh)
+    {
+        const float Value = FMath::Lerp(Step.MorphTargetStartValue, Step.MorphTargetEndValue, Progress);
+        SkelMesh->SetMorphTarget(Step.MorphTargetName, Value);
+    }
+    // Para StaticMesh com morph targets, precisaria de uma abordagem diferente (Material Parameter Collection ou Niagara)
+}
+
+bool URepairableComponent::ArePrerequisitesMet(const FRepairStep& Step) const
+{
+    for (const FName& PrereqId : Step.PrerequisiteStepIds)
+    {
+        bool bFound = false;
+        for (const FRepairStep& OtherStep : RepairSteps)
+        {
+            if (OtherStep.StepId == PrereqId)
+            {
+                if (!OtherStep.bIsCompleted) return false;
+                bFound = true;
+                break;
+            }
+        }
+        if (!bFound)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: Pré-requisito '%s' não encontrado para passo '%s'"), *GetOwner()->GetName(), *PrereqId.ToString(), *Step.StepId.ToString());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool URepairableComponent::BeginStep(FName StepId)
+{
+    for (int32 i = 0; i < RepairSteps.Num(); ++i)
+    {
+        FRepairStep& Step = RepairSteps[i];
+        if (Step.StepId == StepId)
+        {
+            if (Step.bIsCompleted) return false;
+            if (!ArePrerequisitesMet(Step)) return false;
+            if (!HasRequiredInventoryItem(CurrentUser.Get(), Step)) return false;
+            if (!HasRequiredInventoryTool(CurrentUser.Get(), Step)) return false;
+
+            // Verifica ferramenta
+            if (!Step.RequiredToolTag.IsNone()
+                || !Step.RequiredItemFlag.IsNone()
+                || !Step.RequiredSelectedItemId.IsNone())
+            {
+                FInventoryItem Equipped;
+                if (!CurrentUser.IsValid() || !CurrentUser->Inventory || !CurrentUser->Inventory->GetEquippedItem(Equipped) || !ItemMatchesStepRequirements(Equipped, Step))
+                {
+                    return false;
+                }
+            }
+
+            // Inicia passo
+            ActiveStepIndex = i;
+            Step.bIsActive = true;
+            Step.CurrentProgress = Step.bPersistProgress ? Step.CurrentProgress : 0.0f;
+            bIsRepairing = true;
+
+            if (Step.bRestoreHiddenMorphOnStart && !Step.MorphTargetName.IsNone())
+            {
+                if (USkeletalMeshComponent* SkelMesh = GetSkeletalMesh())
+                {
+                    const FName HideMorphName(*(Step.MorphTargetName.ToString() + TEXT("_Hide")));
+                    if (SkelMesh->FindMorphTarget(HideMorphName))
+                    {
+                        SkelMesh->SetMorphTarget(HideMorphName, 0.0f);
+                    }
+                }
+            }
+
+            // Aplica morph target inicial
+            ApplyMorphTarget(Step, Step.CurrentProgress);
+
+            // Efeitos de início
+            if (!Step.EffectSocketName.IsNone())
+            {
+                SpawnEffectAtSocket(Step, Step.EffectSocketName, Step.StartParticle, Step.StartSound);
+            }
+
+            // Broadcast
+            OnStepStarted.Broadcast(Step);
+
+            if (Step.bCompleteImmediatelyOnUse)
+            {
+                Step.CurrentProgress = 1.0f;
+                ApplyMorphTarget(Step, 1.0f);
+                CompleteActiveStep();
+            }
+
+            UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: Iniciado passo '%s' (%s)"), *GetOwner()->GetName(), *Step.StepId.ToString(), *Step.DisplayName.ToString());
+            return true;
+        }
+    }
+    return false;
+}
+
+void URepairableComponent::CompleteActiveStep()
+{
+    FRepairStep* ActiveStep = GetActiveStepMutable();
+    if (!ActiveStep) return;
+
+    FRepairStep CompletedStep = *ActiveStep; // Copia para broadcast
+    const FName CompletedSocket = CompletedStep.EffectSocketName;
+
+    // Marca como completo
+    ActiveStep->bIsCompleted = true;
+    ActiveStep->CurrentProgress = 1.0f;
+    ActiveStep->bIsActive = false;
+    ApplyMorphTarget(*ActiveStep, 1.0f);
+
+    // Faz a peça sumir de vez: se o mesh tiver o morph "<NomeDoMorph>_Hide", volta o morph de
+    // progresso para 0 e liga o _Hide em 1 (a peça colapsa num ponto, no lugar original).
+    if (ActiveStep->bHideMorphOnComplete && !ActiveStep->MorphTargetName.IsNone())
+    {
+        if (USkeletalMeshComponent* HideSkelMesh = GetSkeletalMesh())
+        {
+            const FName HideMorphName(*(ActiveStep->MorphTargetName.ToString() + TEXT("_Hide")));
+            if (HideSkelMesh->FindMorphTarget(HideMorphName))
+            {
+                HideSkelMesh->SetMorphTarget(ActiveStep->MorphTargetName, 0.0f);
+                HideSkelMesh->SetMorphTarget(HideMorphName, 1.0f);
+            }
+        }
+    }
+
+    // Efeitos de conclusão
+    if (!CompletedSocket.IsNone())
+    {
+        SpawnEffectAtSocket(CompletedStep, CompletedSocket, CompletedStep.CompleteParticle, CompletedStep.CompleteSound);
+    }
+
+    StopWorkLoopSound();
+
+    if (CompletedStep.bConsumeRequiredItemOnComplete && CurrentUser.IsValid() && CurrentUser->Inventory)
+    {
+        if (!CompletedStep.RequiredItemId.IsNone())
+        {
+            const int32 RequiredItemInstanceId = FindInventoryItemInstanceId(CurrentUser.Get(), CompletedStep.RequiredItemId);
+            if (RequiredItemInstanceId != INDEX_NONE)
+            {
+                CurrentUser->Inventory->RemoveItem(RequiredItemInstanceId);
+            }
+        }
+        else
+        {
+            FInventoryItem Equipped;
+            if (CurrentUser->Inventory->GetEquippedItem(Equipped) && ItemMatchesStepRequirements(Equipped, CompletedStep))
+            {
+                CurrentUser->Inventory->RemoveItem(Equipped.InstanceId);
+            }
+        }
+    }
+
+    if (CompletedStep.ItemGrantedOnComplete && CurrentUser.IsValid() && CurrentUser->Inventory)
+    {
+        CurrentUser->Inventory->AddItem(CompletedStep.ItemGrantedOnComplete);
+    }
+
+    // Broadcast
+    OnStepCompleted.Broadcast(CompletedStep);
+
+    UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: Completado passo '%s'"), *GetOwner()->GetName(), *CompletedStep.StepId.ToString());
+
+    // Avança para próximo
+    AdvanceToNextStep();
+}
+
+void URepairableComponent::AdvanceToNextStep()
+{
+    ActiveStepIndex = INDEX_NONE;
+    bIsRepairing = false;
+
+    // Procura próximo passo disponível
+    for (int32 i = 0; i < RepairSteps.Num(); ++i)
+    {
+        FRepairStep& Step = RepairSteps[i];
+        if (Step.bIsCompleted) continue;
+        if (!ArePrerequisitesMet(Step)) continue;
+
+        // Próximo passo encontrado - mas NÃO inicia automaticamente
+        // Espera o jogador clicar novamente com a ferramenta certa
+        UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: Próximo passo disponível: '%s' (requer %s)"), *GetOwner()->GetName(), *Step.StepId.ToString(), *Step.RequiredToolTag.ToString());
+        return;
+    }
+
+    // Não declare o reparo concluído se ainda houver etapas incompletas, por exemplo,
+    // devido a um pré-requisito configurado incorretamente na DataTable.
+    const FRepairStep* PendingStep = RepairSteps.FindByPredicate([](const FRepairStep& Step)
+    {
+        return !Step.bIsCompleted;
+    });
+    if (PendingStep)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: Ainda há etapas incompletas; reparo não será finalizado. Etapa pendente: '%s'"),
+            *GetOwner()->GetName(), *PendingStep->StepId.ToString());
+        return;
+    }
+
+    // Nenhum passo restante - reparo completo!
+    bIsFullyRepaired = true;
+    OnAllRepairsCompleted.Broadcast();
+
+    UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: REPARO COMPLETO!"), *GetOwner()->GetName());
+}
+
+void URepairableComponent::SpawnEffectAtSocket(const FRepairStep& Step, FName SocketName, TObjectPtr<UParticleSystem> Particle, TObjectPtr<USoundBase> Sound)
+{
+    if (!TargetMeshComponent) return;
+
+    USceneComponent* MeshComp = TargetMeshComponent;
+    if (!MeshComp->DoesSocketExist(SocketName))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: Socket '%s' não existe no mesh!"), *GetOwner()->GetName(), *SocketName.ToString());
+        return;
+    }
+
+    const FTransform SocketTransform = MeshComp->GetSocketTransform(SocketName, RTS_World);
+
+    if (Particle)
+    {
+        UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), Particle, SocketTransform);
+    }
+
+    if (Sound)
+    {
+        UGameplayStatics::PlaySoundAtLocation(GetWorld(), Sound, SocketTransform.GetLocation());
+    }
+}
+
+void URepairableComponent::PlayWorkLoopSound(const FRepairStep& Step)
+{
+    if (!Step.WorkLoopSound || !TargetMeshComponent) return;
+
+    if (!TargetMeshComponent->DoesSocketExist(Step.EffectSocketName))
+    {
+        return;
+    }
+
+    const FTransform SocketTransform = TargetMeshComponent->GetSocketTransform(Step.EffectSocketName, RTS_World);
+
+    WorkLoopAudioComponent = UGameplayStatics::SpawnSoundAttached(
+        Step.WorkLoopSound,
+        TargetMeshComponent,
+        Step.EffectSocketName,
+        FVector::ZeroVector,
+        FRotator::ZeroRotator,
+        EAttachLocation::SnapToTarget,
+        true // bStopWhenAttachedToDestroyed
+    );
+}
+
+void URepairableComponent::StopWorkLoopSound()
+{
+    if (WorkLoopAudioComponent && WorkLoopAudioComponent->IsPlaying())
+    {
+        WorkLoopAudioComponent->Stop();
+        WorkLoopAudioComponent = nullptr;
+    }
+}
+
+USkeletalMeshComponent* URepairableComponent::GetSkeletalMesh() const
+{
+    if (!TargetMeshComponent) return nullptr;
+    return Cast<USkeletalMeshComponent>(TargetMeshComponent);
+}
+
+UStaticMeshComponent* URepairableComponent::GetStaticMesh() const
+{
+    if (!TargetMeshComponent) return nullptr;
+    return Cast<UStaticMeshComponent>(TargetMeshComponent);
+}

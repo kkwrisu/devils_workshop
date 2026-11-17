@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
 #include "Components/TimelineComponent.h"
+#include "Monsters/MonsterTypes.h"
+#include "RepairStep.h"
 #include "PlayerBase.generated.h"
 
 class UCameraComponent;
@@ -18,6 +20,9 @@ class APlayerController;
 class UTextureRenderTarget2D;
 class UMaterialInstanceDynamic;
 class USceneCaptureComponent2D;
+class URepairableComponent;
+class UTaskListWidget;
+class UPrologueCompletedWidget;
 struct FInputActionValue;
 
 UCLASS(Blueprintable)
@@ -169,6 +174,14 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	bool bBlurBackground = true;
 
+	UPROPERTY()
+	TObjectPtr<URepairableComponent> CurrentRepairableComponent;
+
+	UPROPERTY(EditAnywhere, Category = "Reparo")
+	bool bEnableNewRepairSystem = true;
+
+	bool bIsActivelyRepairing = false;
+
 	UPROPERTY(EditAnywhere, Category = "Inspeção", meta = (EditCondition = "bBlurBackground", ClampMin = "0.05"))
 	float InspectionBlurFStop = 0.3f;
 
@@ -183,6 +196,20 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Bob")
 	double BobAmplitude = 40.0;
+
+	// Monster Reaction Delegates
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerUsedSecurityCamera, AActor*, CameraActor);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerClosedDoor, AActor*, DoorActor);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerMadeNoise, const FNoiseEvent&, NoiseEvent);
+
+	UPROPERTY(BlueprintAssignable, Category = "Monsters")
+	FOnPlayerUsedSecurityCamera OnPlayerUsedSecurityCamera;
+
+	UPROPERTY(BlueprintAssignable, Category = "Monsters")
+	FOnPlayerClosedDoor OnPlayerClosedDoor;
+
+	UPROPERTY(BlueprintAssignable, Category = "Monsters")
+	FOnPlayerMadeNoise OnPlayerMadeNoise;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	TObjectPtr<UCurveFloat> MoveCurve;
@@ -207,6 +234,16 @@ protected:
 
 	UPROPERTY()
 	TObjectPtr<UInventoryWidget> InventoryWidget;
+
+	UPROPERTY()
+	TObjectPtr<UTaskListWidget> TaskListWidget;
+
+	UPROPERTY()
+	TObjectPtr<UPrologueCompletedWidget> PrologueCompletedWidget;
+
+	bool bTaskListOpen = false;
+	bool bIgnoreGoBackUntilReleased = false;
+	bool bPrologueCompletionStarted = false;
 
 	double LastInventoryScrollTime = -1000.0;
 
@@ -271,10 +308,21 @@ protected:
 	void TryUseItemOnPart();
 	void SetPartsInteractable(AActor* Parent, bool bInteractable);
 	void OnClickReleased();
+
+	// --- Novo Sistema de Reparo ---
+	void TryUseItemOnRepairable();
+	void UpdateActiveRepair(float DeltaTime);
+	void StartRepairInteraction(URepairableComponent* Repairable);
+	void StopRepairInteraction();
+	UFUNCTION()
+	void OnRepairStepCompleted(const FRepairStep& Step);
+	UFUNCTION()
+	void OnAllRepairsCompleted();
 	void OnInventoryOpen();
 	void OnInventoryClose();
 	void OnInventoryScroll(const FInputActionValue& Value);
 	void OnGoBack();
+	void OnGoBackReleased();
 	void OnLook(const FInputActionValue& Value);
 	void OnPause();
 
@@ -290,6 +338,10 @@ protected:
 
 	// Preview 3D system
 	void RotatePreviews(float DeltaTime);
+	void ToggleTaskList();
+	UFUNCTION()
+	void OnTaskListCloseRequested();
+	void ShowPrologueCompleted();
 
 private:
 	// Preview 3D system

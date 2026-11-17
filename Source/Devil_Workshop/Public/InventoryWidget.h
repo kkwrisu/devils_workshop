@@ -12,7 +12,6 @@ class UBorder;
 class UImage;
 class UTextBlock;
 class UTextureRenderTarget2D;
-class UMaterialInstanceDynamic;
 class UMaterial;
 class USceneCaptureComponent2D;
 class AActor;
@@ -31,7 +30,7 @@ public:
 	TObjectPtr<UMaterial> PreviewBaseMaterial;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario|Preview3D")
-	bool bUse3DPreview = false;
+	bool bUse3DPreview = true;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventario")
 	bool bKeepVisibleWhenClosed = false;
@@ -63,6 +62,7 @@ public:
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UWrapBox> ItemsWrapBox;
@@ -86,7 +86,6 @@ private:
 	void ShutdownPreviewSystem();
 	UTextureRenderTarget2D* GetOrCreateRenderTarget(int32 SlotIndex);
 	void UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh);
-	void UpdatePreviewMaterial(int32 SlotIndex);
 	void ApplyPreviewMaterialsToImages();
 	void RotatePreviews(float DeltaTime);
 
@@ -99,8 +98,7 @@ private:
 	UPROPERTY()
 	TArray<TObjectPtr<UTextureRenderTarget2D>> PreviewRenderTargets;
 
-	UPROPERTY()
-	TArray<TObjectPtr<UMaterialInstanceDynamic>> PreviewMaterials;
+	TArray<int32> VisibleItemIndices;
 
 	int32 LastSelectedIndex = INDEX_NONE;
 	int32 MaxPreviewSlots = 20;

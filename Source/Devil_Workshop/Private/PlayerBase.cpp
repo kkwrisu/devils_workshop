@@ -3,6 +3,9 @@
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/ShapeComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Components/Widget.h"
 #include "CollisionQueryParams.h"
 #include "Curves/CurveFloat.h"
@@ -18,13 +21,21 @@
 #include "InventoryComponent.h"
 #include "InventoryWidget.h"
 #include "ItemUseTarget.h"
+#include "ItemPickup.h"
+#include "BatteryCharger.h"
 #include "RepairPart.h"
+#include "RepairableComponent.h"
+#include "RepairStep.h"
+#include "TaskListBoard.h"
+#include "TaskListWidget.h"
+#include "PrologueCompletedWidget.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Monsters/MonsterTypes.h"
 
 static UCurveFloat* MakeDefaultCurve(UObject* Outer, float EndTime, float EndValue, bool bSmooth)
 {
@@ -167,6 +178,24 @@ void APlayerBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// A lista bloqueia o controle do jogador sem pausar o restante do mundo.
+	if (bTaskListOpen)
+	{
+		if (CachedPlayerController && TaskListWidget)
+		{
+			if (CachedPlayerController->WasInputKeyJustPressed(EKeys::E))
+			{
+				TaskListWidget->ShowControlsPage();
+			}
+			else if (CachedPlayerController->WasInputKeyJustPressed(EKeys::Q))
+			{
+				TaskListWidget->ShowRadioPage();
+			}
+		}
+		bInspectDragging = false;
+		return;
+	}
+
 	MoveTimeline.TickTimeline(DeltaTime);
 	CameraFocusTimeline.TickTimeline(DeltaTime);
 	InspectTimeline.TickTimeline(DeltaTime);
@@ -205,6 +234,12 @@ void APlayerBase::Tick(float DeltaTime)
 	{
 		UpdateInspectionZoom(DeltaTime);
 		UpdateInspectionRotation();
+
+		// Atualiza progresso de reparo ativo (novo sistema data-driven)
+		if (bIsActivelyRepairing && CurrentRepairableComponent)
+		{
+			UpdateActiveRepair(DeltaTime);
+		}
 	}
 	else
 	{
@@ -233,7 +268,7 @@ void APlayerBase::ApplyLookPitchDelta(double Delta)
 
 void APlayerBase::OnLook(const FInputActionValue& Value)
 {
-	if (isInspecting || IsTransitioning || bIsCameraFocused || bInventoryOpen) return;
+	if (isInspecting || IsTransitioning || bIsCameraFocused || bInventoryOpen || bTaskListOpen) return;
 
 	const double Dt = GetWorld()->GetDeltaSeconds();
 	LookYawOffset = FMath::Clamp(LookYawOffset + static_cast<double>(Value.Get<float>()) * Dt * 60.0, -YawLimit, YawLimit);
@@ -259,7 +294,7 @@ bool APlayerBase::IsMouseNearScreenEdge()
 
 void APlayerBase::OnClick()
 {
-	if (bInventoryOpen) return;
+	if (bInventoryOpen || bTaskListOpen) return;
 
 	bClickHeld = true;
 
@@ -287,6 +322,12 @@ void APlayerBase::OnClick()
 			}
 			else
 			{
+				// Tenta primeiro o novo sistema de reparo (data-driven)
+				if (bEnableNewRepairSystem)
+				{
+					TryUseItemOnRepairable();
+				}
+				// Fallback para o sistema antigo (ARepairPart actors)
 				TryUseItemOnPart();
 			}
 		}
@@ -322,6 +363,24 @@ void APlayerBase::OnClick()
 
 		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
 
+		if (Cast<ATaskListBoard>(HitActor))
+		{
+			ToggleTaskList();
+			return;
+		}
+
+		// Pegar item solto no cenario (ex.: bateria nova)
+		if (AItemPickup* Pickup = Cast<AItemPickup>(HitActor))
+		{
+			if (Pickup->TryPickup(this)) return;
+		}
+
+		// Recolher a bateria carregada do carregador
+		if (ABatteryCharger* Charger = Cast<ABatteryCharger>(HitActor))
+		{
+			if (Charger->TryCollect(this)) return;
+		}
+
 		if (Inventory && HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass()))
 		{
 			FInventoryItem Equipped;
@@ -332,6 +391,20 @@ void APlayerBase::OnClick()
 				{
 					Inventory->RemoveItem(Equipped.InstanceId);
 				}
+
+				// Broadcast noise event if the item makes noise (Radio, Bell, etc.)
+				if (Equipped.Data && (Equipped.Data->HasTag("Radio") || Equipped.Data->HasTag("NoiseMaker") || Equipped.Data->HasTag("Bell")))
+				{
+					FNoiseEvent NoiseEvent;
+					NoiseEvent.NoiseTag = MonsterTags::Noise_Event_Radio_Active;
+					NoiseEvent.Location = GetActorLocation();
+					NoiseEvent.Loudness = 1.0f;
+					NoiseEvent.HearRange = 2000.0f;
+					NoiseEvent.Instigator = this;
+					NoiseEvent.Timestamp = GetWorld()->GetTimeSeconds();
+					OnPlayerMadeNoise.Broadcast(NoiseEvent);
+				}
+
 				return;
 			}
 		}
@@ -351,6 +424,13 @@ void APlayerBase::OnClick()
 			if (!FallbackClickable) FallbackClickable = HitActor;
 			Params.AddIgnoredActor(HitActor);
 			continue;
+		}
+
+		// Check for Door interaction
+		if (HitActor->ActorHasTag("Door"))
+		{
+			OnPlayerClosedDoor.Broadcast(HitActor);
+			return;
 		}
 
 		break;
@@ -382,7 +462,26 @@ void APlayerBase::TryUseItemOnPart()
 	if (!GetWorld()->LineTraceSingleByChannel(Hit, WorldOrigin, WorldOrigin + WorldDirection * 100000.0, ECC_Visibility, Params)) return;
 
 	AActor* HitActor = Hit.GetActor();
-	if (!HitActor || !HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass())) return;
+	if (!HitActor) return;
+
+	// 1. Tenta o novo sistema de reparo (URepairableComponent no actor ou no parent)
+	if (bEnableNewRepairSystem)
+	{
+		URepairableComponent* Repairable = HitActor->FindComponentByClass<URepairableComponent>();
+		if (!Repairable && HitActor->GetAttachParentActor())
+		{
+			Repairable = HitActor->GetAttachParentActor()->FindComponentByClass<URepairableComponent>();
+		}
+
+		if (Repairable && IItemUseTarget::Execute_CanUseItem(Repairable, Equipped))
+		{
+			IItemUseTarget::Execute_UseItem(Repairable, Equipped, this);
+			return;
+		}
+	}
+
+	// 2. Fallback para o sistema antigo (ARepairPart actors implementando IItemUseTarget)
+	if (!HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass())) return;
 	if (!IItemUseTarget::Execute_CanUseItem(HitActor, Equipped)) return;
 
 	if (IItemUseTarget::Execute_UseItem(HitActor, Equipped, this))
@@ -413,11 +512,17 @@ void APlayerBase::OnClickReleased()
 
 	bClickHeld = false;
 	bInspectDragging = false;
+
+	// Para reparo ativo se houver
+	if (bIsActivelyRepairing)
+	{
+		StopRepairInteraction();
+	}
 }
 
 void APlayerBase::OnInventoryOpen()
 {
-	if (bInventoryOpen || !Inventory) return;
+	if (bInventoryOpen || bTaskListOpen || !Inventory) return;
 
 	bInventoryOpen = true;
 	bClickHeld = false;
@@ -475,6 +580,14 @@ void APlayerBase::OnGoBack()
 {
 	UE_LOG(LogTemp, Warning, TEXT("OnGoBack chamado | isInspecting = %d | IsTransitioning = %d"), isInspecting ? 1 : 0, IsTransitioning ? 1 : 0);
 
+	if (bIgnoreGoBackUntilReleased) return;
+
+	if (bTaskListOpen)
+	{
+		bIgnoreGoBackUntilReleased = true;
+		ToggleTaskList();
+		return;
+	}
 	if (IsTransitioning || bInventoryOpen) return;
 
 	if (isInspecting)
@@ -495,6 +608,11 @@ void APlayerBase::OnGoBack()
 	PositionHistory.RemoveAt(PositionHistory.Num() - 1);
 	CurrentAreaActor = nullptr;
 	MoveToPosition(Last);
+}
+
+void APlayerBase::OnGoBackReleased()
+{
+	bIgnoreGoBackUntilReleased = false;
 }
 
 void APlayerBase::MoveToPosition(const FTransform& Target)
@@ -581,6 +699,14 @@ void APlayerBase::OnCameraFocusFinished()
 		bExitingCameraFocus = false;
 		bIsCameraFocused = false;
 	}
+	else
+	{
+		// Player finished focusing on something - check if it was a security camera
+		if (InspectedObject && InspectedObject->ActorHasTag("SecurityCamera"))
+		{
+			OnPlayerUsedSecurityCamera.Broadcast(InspectedObject);
+		}
+	}
 }
 
 void APlayerBase::StartInspection(AActor* TargetObject)
@@ -612,7 +738,38 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 
 	FVector BoundsOrigin = FVector::ZeroVector;
 	FVector BoundsExtent = FVector::ZeroVector;
-	TargetObject->GetActorBounds(false, BoundsOrigin, BoundsExtent);
+
+	// Mede só os meshes visíveis. Para Skeletal Mesh, usa o bounds do asset
+	// (e não o do componente, que pode ser afetado pelo Physics Asset).
+	FBox VisualBox(ForceInit);
+	TArray<UPrimitiveComponent*> BoundsPrimitives;
+	TargetObject->GetComponents<UPrimitiveComponent>(BoundsPrimitives);
+	for (UPrimitiveComponent* Prim : BoundsPrimitives)
+	{
+		if (!Prim || !Prim->IsRegistered() || Cast<UShapeComponent>(Prim)) continue;
+
+		if (const USkeletalMeshComponent* Skel = Cast<USkeletalMeshComponent>(Prim))
+		{
+			if (const USkeletalMesh* MeshAsset = Skel->GetSkeletalMeshAsset())
+			{
+				VisualBox += MeshAsset->GetBounds().TransformBy(Skel->GetComponentTransform()).GetBox();
+			}
+			// Skeletal Mesh Component sem mesh (vazio) nao entra na medida
+			continue;
+		}
+		VisualBox += Prim->Bounds.GetBox();
+	}
+
+	if (VisualBox.IsValid)
+	{
+		VisualBox.GetCenterAndExtents(BoundsOrigin, BoundsExtent);
+	}
+	else
+	{
+		TargetObject->GetActorBounds(false, BoundsOrigin, BoundsExtent);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("Inspecao: bounds origem = %s | extensao = %s | escala do ator = %s"), *BoundsOrigin.ToString(), *BoundsExtent.ToString(), *TargetObject->GetActorScale3D().ToString());
 
 	InspectStartCenter = BoundsOrigin;
 	InspectLocalCenterOffset = TargetObject->GetActorQuat().UnrotateVector(BoundsOrigin - InspectStartLocation);
@@ -660,6 +817,12 @@ void APlayerBase::ExitInspection()
 	}
 
 	UE_LOG(LogTemp, Warning, TEXT("ExitInspection chamado"));
+
+	// Para reparo ativo ao sair da inspeção
+	if (bIsActivelyRepairing)
+	{
+		StopRepairInteraction();
+	}
 
 	InspectExitRotation = InspectedObject->GetActorRotation();
 	bExitingInspection = true;
@@ -820,9 +983,15 @@ void APlayerBase::ClearInspectionBlur()
 
 void APlayerBase::OnPause()
 {
+	if (bTaskListOpen) return;
+
 	if (bInventoryOpen)
 	{
 		OnInventoryClose();
+	}
+	if (bTaskListOpen)
+	{
+		ToggleTaskList();
 	}
 
 	if (!CachedPlayerController) return;
@@ -856,6 +1025,240 @@ void APlayerBase::RotatePreviews(float DeltaTime)
 	}
 }
 
+void APlayerBase::ToggleTaskList()
+{
+	if (!CachedPlayerController)
+	{
+		UE_LOG(LogTemp, Error, TEXT("TaskList: nao abriu; CachedPlayerController esta nulo."));
+		return;
+	}
+
+	const bool bOpening = !bTaskListOpen;
+	TArray<FRepairStep> ChecklistSteps;
+	if (bOpening)
+	{
+		TArray<AActor*> Actors;
+		UGameplayStatics::GetAllActorsOfClass(this, AActor::StaticClass(), Actors);
+		for (AActor* Actor : Actors)
+		{
+			if (!Actor) continue;
+			URepairableComponent* Repairable = Actor->FindComponentByClass<URepairableComponent>();
+			if (!Repairable || Repairable->RepairSteps.Num() == 0) continue;
+
+			const bool bLooksLikeRadioRepair = Repairable->RepairSteps.ContainsByPredicate([](const FRepairStep& Step)
+			{
+				return Step.StepId.ToString().Contains(TEXT("Screw"))
+					|| Step.StepId.ToString().Contains(TEXT("Battery"));
+			});
+			if (bLooksLikeRadioRepair)
+			{
+				ChecklistSteps = Repairable->RepairSteps;
+				break;
+			}
+		}
+	}
+
+	if (!TaskListWidget)
+	{
+		TaskListWidget = CreateWidget<UTaskListWidget>(CachedPlayerController, UTaskListWidget::StaticClass());
+		if (!TaskListWidget)
+		{
+			UE_LOG(LogTemp, Error, TEXT("TaskList: CreateWidget falhou."));
+			return;
+		}
+		TaskListWidget->InitializeChecklist(ChecklistSteps);
+		TaskListWidget->OnCloseRequested.AddDynamic(this, &APlayerBase::OnTaskListCloseRequested);
+		UE_LOG(LogTemp, Warning, TEXT("TaskList: widget criado: %s"), *GetNameSafe(TaskListWidget));
+		TaskListWidget->AddToViewport(100);
+		UE_LOG(LogTemp, Warning, TEXT("TaskList: widget adicionado ao viewport."));
+	}
+	else if (bOpening)
+	{
+		TaskListWidget->InitializeChecklist(ChecklistSteps);
+	}
+
+	bTaskListOpen = !bTaskListOpen;
+	TaskListWidget->SetVisibility(bTaskListOpen ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+	TaskListWidget->SetRenderOpacity(1.0f);
+	UE_LOG(LogTemp, Warning, TEXT("TaskList: %s; visibilidade=%s; viewport=%d"),
+		bTaskListOpen ? TEXT("aberta") : TEXT("fechada"),
+		TaskListWidget->GetVisibility() == ESlateVisibility::Visible ? TEXT("Visible") : TEXT("Collapsed"),
+		TaskListWidget->IsInViewport() ? 1 : 0);
+	if (bTaskListOpen)
+	{
+		bClickHeld = false;
+	}
+}
+
+void APlayerBase::OnTaskListCloseRequested()
+{
+	if (bTaskListOpen)
+	{
+		ToggleTaskList();
+	}
+}
+
+void APlayerBase::ShowPrologueCompleted()
+{
+	if (bPrologueCompletionStarted || !CachedPlayerController) return;
+	bPrologueCompletionStarted = true;
+
+	PrologueCompletedWidget = CreateWidget<UPrologueCompletedWidget>(CachedPlayerController, UPrologueCompletedWidget::StaticClass());
+	if (PrologueCompletedWidget)
+	{
+		PrologueCompletedWidget->AddToViewport(1000);
+	}
+}
+
+// --- Novo Sistema de Reparo Data-Driven ---
+
+void APlayerBase::TryUseItemOnRepairable()
+{
+	if (!Inventory || !CachedPlayerController || !InspectedObject) return;
+
+	// Mao livre tambem vale: passos sem ferramenta (Required Tool Tag = None) nao exigem item equipado.
+	// Sem item equipado, Equipped fica vazio (Data nula).
+	FInventoryItem Equipped;
+	Inventory->GetEquippedItem(Equipped);
+
+	// Procura URepairableComponent no objeto inspecionado
+	URepairableComponent* Repairable = InspectedObject->FindComponentByClass<URepairableComponent>();
+	if (!Repairable)
+	{
+		return;
+	}
+
+	// Define o jogador para que o componente possa validar peças exigidas no inventário.
+	Repairable->StartRepair(this);
+
+	// Verifica se pode usar o item equipado e as peças necessárias no inventário.
+	if (!IItemUseTarget::Execute_CanUseItem(Repairable, Equipped))
+	{
+		return;
+	}
+
+	// Inicia interação de reparo
+	StartRepairInteraction(Repairable);
+
+	// Tenta usar o item (isso vai iniciar o passo apropriado)
+	IItemUseTarget::Execute_UseItem(Repairable, Equipped, this);
+}
+
+void APlayerBase::UpdateActiveRepair(float DeltaTime)
+{
+	if (!CurrentRepairableComponent || !bIsActivelyRepairing) return;
+
+	// Guardamos o componente atual: UpdateRepairProgress pode concluir a última etapa e
+	// disparar OnAllRepairsCompleted, cujo callback encerra a interação e limpa o membro.
+	URepairableComponent* RepairableBeingUpdated = CurrentRepairableComponent;
+
+	// Atualiza progresso do componente de reparo
+	RepairableBeingUpdated->UpdateRepairProgress(DeltaTime);
+
+	// A conclusão pode ter encerrado a interação de forma síncrona dentro da chamada acima.
+	if (!bIsActivelyRepairing || CurrentRepairableComponent != RepairableBeingUpdated)
+	{
+		return;
+	}
+
+	// Verifica se o jogador soltou o clique ou trocou de ferramenta
+	if (!IsClickHeld())
+	{
+		StopRepairInteraction();
+	}
+	else if (Inventory)
+	{
+		const int32 ActiveStepIndex = CurrentRepairableComponent->GetActiveStepIndex();
+		if (ActiveStepIndex != INDEX_NONE)
+		{
+			const FRepairStep& ActiveStep = CurrentRepairableComponent->GetActiveStep();
+
+			// Valida a ferramenta e as flags exigidas pelo passo (ex.: bateria Carregada).
+			if (!ActiveStep.RequiredToolTag.IsNone()
+				|| !ActiveStep.RequiredItemFlag.IsNone()
+				|| !ActiveStep.RequiredSelectedItemId.IsNone())
+			{
+				FInventoryItem Equipped;
+				const bool bHasEquippedItem = Inventory->GetEquippedItem(Equipped);
+				const bool bHasRequiredTag = ActiveStep.RequiredToolTag.IsNone()
+					|| (bHasEquippedItem && Equipped.Data && Equipped.Data->HasTag(ActiveStep.RequiredToolTag));
+				const bool bHasRequiredFlag = ActiveStep.RequiredItemFlag.IsNone()
+					|| (bHasEquippedItem && Equipped.Flags.Contains(ActiveStep.RequiredItemFlag));
+				const bool bHasRequiredSelectedItem = ActiveStep.RequiredSelectedItemId.IsNone()
+					|| (bHasEquippedItem && Equipped.Data && Equipped.Data->ItemId == ActiveStep.RequiredSelectedItemId);
+				if (!bHasEquippedItem || !bHasRequiredTag || !bHasRequiredFlag || !bHasRequiredSelectedItem)
+				{
+					StopRepairInteraction();
+				}
+			}
+		}
+	}
+}
+
+void APlayerBase::StartRepairInteraction(URepairableComponent* Repairable)
+{
+	if (!Repairable) return;
+
+	CurrentRepairableComponent = Repairable;
+	bIsActivelyRepairing = true;
+
+	// Bind delegates
+	if (CurrentRepairableComponent)
+	{
+		CurrentRepairableComponent->OnStepCompleted.AddDynamic(this, &APlayerBase::OnRepairStepCompleted);
+		CurrentRepairableComponent->OnAllRepairsCompleted.AddDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Iniciado reparo em '%s'"), *InspectedObject->GetName());
+}
+
+void APlayerBase::StopRepairInteraction()
+{
+	if (!bIsActivelyRepairing) return;
+
+	bIsActivelyRepairing = false;
+
+	// Para o componente de reparo
+	if (CurrentRepairableComponent)
+	{
+		CurrentRepairableComponent->StopRepair();
+
+		CurrentRepairableComponent->OnStepCompleted.RemoveDynamic(this, &APlayerBase::OnRepairStepCompleted);
+		CurrentRepairableComponent->OnAllRepairsCompleted.RemoveDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+	}
+
+	CurrentRepairableComponent = nullptr;
+
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Reparo interrompido"));
+}
+
+void APlayerBase::OnRepairStepCompleted(const FRepairStep& Step)
+{
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Passo de reparo completado: %s"), *Step.StepId.ToString());
+	if (TaskListWidget)
+	{
+		TaskListWidget->MarkStepCompleted(Step.StepId);
+	}
+
+	// O widget continua mostrando o progresso até o próximo passo ser iniciado
+	// O próximo passo só inicia quando o jogador clica novamente com a ferramenta certa
+}
+
+void APlayerBase::OnAllRepairsCompleted()
+{
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: TODOS OS REPAROS COMPLETOS em '%s'!"), *InspectedObject->GetName());
+
+	StopRepairInteraction();
+	ShowPrologueCompleted();
+
+	// Aqui você pode adicionar lógica extra:
+	// - Trocar mesh do objeto para versão "reparada"
+	// - Habilitar funcionalidade do objeto (ex.: rádio toca)
+	// - Dar item ao jogador
+	// - Tocar som de sucesso
+	// - Trigger evento de quest
+}
+
 void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
@@ -875,7 +1278,12 @@ void APlayerBase::SetupPlayerInputComponent(UInputComponent* PlayerInputComponen
 	}
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: ClickAction não atribuída.")); }
 
-	if (GoBackAction) { EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack); }
+	if (GoBackAction)
+	{
+		EIC->BindAction(GoBackAction, ETriggerEvent::Triggered, this, &APlayerBase::OnGoBack);
+		EIC->BindAction(GoBackAction, ETriggerEvent::Completed, this, &APlayerBase::OnGoBackReleased);
+		EIC->BindAction(GoBackAction, ETriggerEvent::Canceled, this, &APlayerBase::OnGoBackReleased);
+	}
 	else { UE_LOG(LogTemp, Warning, TEXT("PlayerBase: GoBackAction não atribuída.")); }
 
 	if (LookAction) { EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &APlayerBase::OnLook); }
