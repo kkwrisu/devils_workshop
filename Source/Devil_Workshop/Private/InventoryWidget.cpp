@@ -2,21 +2,144 @@
 
 #include "Components/WrapBox.h"
 #include "Components/WrapBoxSlot.h"
+#include "Components/BackgroundBlur.h"
 #include "Components/Border.h"
+#include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
 #include "Components/Image.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Blueprint/WidgetTree.h"
+#include "Rendering/DrawElementTypes.h"
+#include "Rendering/RenderingCommon.h"
+#include "Textures/SlateShaderResource.h"
+#include "Styling/SlateBrush.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
+#include "Engine/Texture.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Styling/CoreStyle.h"
 #include "GameFramework/Actor.h"
 #include "InventoryComponent.h"
 #include "ItemData.h"
 #include "InventoryTypes.h"
+
+TSharedRef<SWidget> UInventoryWidget::RebuildWidget()
+{
+	BuildInventoryScreen();
+	return Super::RebuildWidget();
+}
+
+void UInventoryWidget::BuildInventoryScreen()
+{
+	if (bInventoryScreenBuilt || !WidgetTree) return;
+
+	if (!ItemsWrapBox)
+	{
+		ItemsWrapBox = Cast<UWrapBox>(WidgetTree->FindWidget(TEXT("ItemsWrapBox")));
+	}
+	if (ItemsWrapBox)
+	{
+		ItemsWrapBox->RemoveFromParent();
+	}
+
+	UCanvasPanel* Root = WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("InventoryScreen"));
+	WidgetTree->RootWidget = Root;
+
+	InventoryBackgroundBlur = WidgetTree->ConstructWidget<UBackgroundBlur>(UBackgroundBlur::StaticClass(), TEXT("InventoryBackgroundBlur"));
+	InventoryBackgroundBlur->SetBlurStrength(12.0f);
+	InventoryBackgroundBlur->SetApplyAlphaToBlur(true);
+	Root->AddChild(InventoryBackgroundBlur);
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(InventoryBackgroundBlur->Slot))
+	{
+		CanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+		CanvasSlot->SetOffsets(FMargin(0.0f));
+	}
+
+	UBorder* Dimmer = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("InventoryDimmer"));
+	Dimmer->SetBrushColor(FLinearColor(0.015f, 0.02f, 0.025f, 0.48f));
+	Root->AddChild(Dimmer);
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Dimmer->Slot))
+	{
+		CanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+		CanvasSlot->SetOffsets(FMargin(0.0f));
+		CanvasSlot->SetZOrder(1);
+	}
+
+	SelectedItemPreview = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("SelectedItemPreview"));
+	SelectedItemPreview->SetDesiredSizeOverride(FVector2D(360.0f, 360.0f));
+	// This image only supplies layout geometry for NativePaint; the circular texture is drawn in Slate.
+	SelectedItemPreview->SetColorAndOpacity(FLinearColor::Transparent);
+	Root->AddChild(SelectedItemPreview);
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(SelectedItemPreview->Slot))
+	{
+		CanvasSlot->SetAnchors(FAnchors(0.5f, 0.5f));
+		CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
+		CanvasSlot->SetPosition(FVector2D(0.0f, 10.0f));
+		CanvasSlot->SetSize(FVector2D(360.0f, 360.0f));
+		CanvasSlot->SetZOrder(2);
+	}
+
+	SelectedItemName = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("SelectedItemName"));
+	SelectedItemName->SetFont(FCoreStyle::GetDefaultFontStyle("Bold", 26));
+	SelectedItemName->SetColorAndOpacity(FSlateColor(FLinearColor(0.94f, 0.86f, 0.68f, 1.0f)));
+	SelectedItemName->SetJustification(ETextJustify::Center);
+	Root->AddChild(SelectedItemName);
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(SelectedItemName->Slot))
+	{
+		CanvasSlot->SetAnchors(FAnchors(0.5f, 0.5f));
+		CanvasSlot->SetAlignment(FVector2D(0.5f, 0.0f));
+		CanvasSlot->SetPosition(FVector2D(0.0f, -290.0f));
+		CanvasSlot->SetSize(FVector2D(600.0f, 42.0f));
+		CanvasSlot->SetZOrder(3);
+	}
+
+	SelectedItemDescription = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("SelectedItemDescription"));
+	SelectedItemDescription->SetFont(FCoreStyle::GetDefaultFontStyle("Regular", 16));
+	SelectedItemDescription->SetColorAndOpacity(FSlateColor(FLinearColor(0.75f, 0.77f, 0.76f, 1.0f)));
+	SelectedItemDescription->SetJustification(ETextJustify::Center);
+	SelectedItemDescription->SetAutoWrapText(true);
+	Root->AddChild(SelectedItemDescription);
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(SelectedItemDescription->Slot))
+	{
+		CanvasSlot->SetAnchors(FAnchors(0.5f, 0.5f));
+		CanvasSlot->SetAlignment(FVector2D(0.5f, 0.0f));
+		CanvasSlot->SetPosition(FVector2D(0.0f, -252.0f));
+		CanvasSlot->SetSize(FVector2D(600.0f, 56.0f));
+		CanvasSlot->SetZOrder(3);
+	}
+
+	if (!ItemsWrapBox)
+	{
+		ItemsWrapBox = WidgetTree->ConstructWidget<UWrapBox>(UWrapBox::StaticClass(), TEXT("ItemsWrapBox"));
+	}
+	ItemsWrapBox->SetOrientation(Orient_Horizontal);
+	ItemsWrapBox->SetHorizontalAlignment(HAlign_Center);
+	ItemsWrapBox->SetExplicitWrapSize(true);
+	ItemsWrapBox->SetWrapSize(1300.0f);
+	ItemsWrapBox->SetInnerSlotPadding(FVector2D(8.0f, 0.0f));
+	UTextBlock* ControlsHint = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("InventoryControlsHint"));
+	ControlsHint->SetText(FText::FromString(TEXT("RODA DO MOUSE  ·  TROCAR ITEM          TAB  ·  FECHAR")));
+	ControlsHint->SetFont(FCoreStyle::GetDefaultFontStyle("Regular", 13));
+	ControlsHint->SetColorAndOpacity(FSlateColor(FLinearColor(0.7f, 0.72f, 0.69f, 0.85f)));
+	ControlsHint->SetJustification(ETextJustify::Center);
+	Root->AddChild(ControlsHint);
+	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(ControlsHint->Slot))
+	{
+		CanvasSlot->SetAnchors(FAnchors(0.5f, 1.0f));
+		CanvasSlot->SetAlignment(FVector2D(0.5f, 1.0f));
+		CanvasSlot->SetPosition(FVector2D(0.0f, -182.0f));
+		CanvasSlot->SetSize(FVector2D(700.0f, 24.0f));
+		CanvasSlot->SetZOrder(5);
+	}
+
+	bInventoryScreenBuilt = true;
+}
 
 void UInventoryWidget::NativeConstruct()
 {
@@ -45,7 +168,145 @@ void UInventoryWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime
 	if (GetVisibility() != ESlateVisibility::Collapsed)
 	{
 		RotatePreviews(InDeltaTime);
+		if (bSelectionAnimationInitialized && !FMath::IsNearlyEqual(AnimatedSelectionPosition, TargetSelectionPosition, 0.001f))
+		{
+			AnimatedSelectionPosition = FMath::FInterpTo(AnimatedSelectionPosition, TargetSelectionPosition, InDeltaTime, SelectionAnimationSpeed);
+			if (FMath::IsNearlyEqual(AnimatedSelectionPosition, TargetSelectionPosition, 0.01f))
+			{
+				AnimatedSelectionPosition = TargetSelectionPosition;
+			}
+			InvalidateLayoutAndVolatility();
+		}
 	}
+}
+
+int32 UInventoryWidget::NativePaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
+{
+	const int32 MaxLayerId = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	if (!SelectedItemPreview || !SelectedItemPreview->IsVisible())
+	{
+		return MaxLayerId;
+	}
+
+	const FGeometry& PreviewGeometry = SelectedItemPreview->GetCachedGeometry();
+	const FVector2D PreviewSize = PreviewGeometry.GetLocalSize();
+	if (PreviewSize.X <= 0.0 || PreviewSize.Y <= 0.0)
+	{
+		return MaxLayerId;
+	}
+
+	const FVector2D PreviewCenter = PreviewGeometry.LocalToAbsolute(PreviewSize * 0.5);
+	const FSlateRenderTransform& WidgetRenderTransform = AllottedGeometry.GetAccumulatedRenderTransform();
+	int32 DrawLayer = MaxLayerId;
+
+	auto DrawCircularTexture = [&](UTexture* Texture, const FVector2D& AbsoluteCenter, const FVector2D& Size)
+	{
+		if (!Texture) return;
+
+		constexpr int32 SegmentCount = 64;
+		TArray<FSlateVertex> Vertices;
+		TArray<SlateIndex> Indices;
+		Vertices.Reserve(SegmentCount + 1);
+		Indices.Reserve(SegmentCount * 3);
+
+		const FVector2D Center = AllottedGeometry.AbsoluteToLocal(AbsoluteCenter);
+		const float RadiusX = static_cast<float>(Size.X * 0.5);
+		const float RadiusY = static_cast<float>(Size.Y * 0.5);
+		const FColor VertexColor = FColor::White;
+		Vertices.Add(FSlateVertex::Make(WidgetRenderTransform, FVector2f(Center), FVector2f(0.5f, 0.5f), VertexColor));
+
+		for (int32 Segment = 0; Segment < SegmentCount; ++Segment)
+		{
+			const float Angle = 2.0f * PI * static_cast<float>(Segment) / static_cast<float>(SegmentCount);
+			const float U = 0.5f + 0.5f * FMath::Cos(Angle);
+			const float V = 0.5f + 0.5f * FMath::Sin(Angle);
+			const FVector2D Point = AbsoluteCenter + FVector2D(FMath::Cos(Angle) * RadiusX, FMath::Sin(Angle) * RadiusY);
+			Vertices.Add(FSlateVertex::Make(WidgetRenderTransform, FVector2f(AllottedGeometry.AbsoluteToLocal(Point)), FVector2f(U, V), VertexColor));
+		}
+
+		for (int32 Segment = 0; Segment < SegmentCount; ++Segment)
+		{
+			Indices.Add(0);
+			Indices.Add(static_cast<SlateIndex>(Segment + 1));
+			Indices.Add(static_cast<SlateIndex>(((Segment + 1) % SegmentCount) + 1));
+		}
+
+		FSlateBrush& TextureBrush = const_cast<UInventoryWidget*>(this)->CircularPreviewBrushCache.FindOrAdd(Texture);
+		if (!TextureBrush.GetResourceObject())
+		{
+			TextureBrush.SetResourceObject(Texture);
+			TextureBrush.DrawAs = ESlateBrushDrawType::Image;
+		}
+		const FSlateResourceHandle& ResourceHandle = TextureBrush.GetRenderingResource();
+		if (!ResourceHandle.IsValid()) return;
+		const FSlateShaderResourceProxy* ResourceProxy = ResourceHandle.GetResourceProxy();
+		if (!ResourceProxy || !ResourceProxy->Resource || !ResourceProxy->Resource->IsResourceValid()) return;
+		FSlateDrawElement::MakeCustomVerts(OutDrawElements, ++DrawLayer, ResourceHandle, Vertices, Indices, nullptr, 0, 0, ESlateDrawEffect::InvertAlpha);
+	};
+
+	if (Inventory && Inventory->GetItems().IsValidIndex(Inventory->GetSelectedIndex()))
+	{
+		const TArray<FInventoryItem>& Items = Inventory->GetItems();
+		const float FocusPosition = AnimatedSelectionPosition;
+		auto GetItemPreviewTexture = [&](int32 ItemIndex) -> UTexture*
+		{
+			if (!Items.IsValidIndex(ItemIndex) || !Items[ItemIndex].Data) return nullptr;
+			if (Items[ItemIndex].Data->InspectMesh && PreviewRenderTargets.IsValidIndex(ItemIndex) && PreviewRenderTargets[ItemIndex])
+			{
+				return PreviewRenderTargets[ItemIndex];
+			}
+			return Items[ItemIndex].Data->Icon;
+		};
+
+		TArray<int32> VisiblePreviewIndices;
+		const float ItemCount = static_cast<float>(Items.Num());
+		auto GetWrappedDelta = [&](int32 ItemIndex)
+		{
+			if (ItemCount == 2.0f)
+			{
+				// Keep the next item on the right of the first; the previous item sits left of the second.
+				return ItemIndex == 0 ? -FocusPosition : 1.0f - FocusPosition;
+			}
+
+			float Delta = static_cast<float>(ItemIndex) - FocusPosition;
+			if (ItemCount > 1.0f)
+			{
+				Delta = FMath::Fmod(Delta, ItemCount);
+				if (Delta > ItemCount * 0.5f) Delta -= ItemCount;
+				if (Delta < -ItemCount * 0.5f) Delta += ItemCount;
+				// For an exact half-turn, place the wrapped previous item on the left.
+				if (FMath::IsNearlyEqual(Delta, ItemCount * 0.5f)) Delta -= ItemCount;
+			}
+			return Delta;
+		};
+		for (int32 ItemIndex = 0; ItemIndex < Items.Num(); ++ItemIndex)
+		{
+			if (FMath::Abs(GetWrappedDelta(ItemIndex)) <= 1.25f && GetItemPreviewTexture(ItemIndex))
+			{
+				VisiblePreviewIndices.Add(ItemIndex);
+			}
+		}
+		VisiblePreviewIndices.Sort([&](int32 A, int32 B)
+		{
+			return FMath::Abs(GetWrappedDelta(A)) > FMath::Abs(GetWrappedDelta(B));
+		});
+
+		for (const int32 ItemIndex : VisiblePreviewIndices)
+		{
+			const float Delta = GetWrappedDelta(ItemIndex);
+			const float Distance = FMath::Abs(Delta);
+			const float Depth = FMath::Min(Distance, 1.0f);
+			const float Size = FMath::Lerp(360.0f, 150.0f, Depth);
+			const float Side = FMath::Sign(Delta);
+			const FVector2D ItemCenter = PreviewCenter + FVector2D(Side * 285.0f * Depth, 35.0f * Depth);
+			DrawCircularTexture(GetItemPreviewTexture(ItemIndex), ItemCenter, FVector2D(Size, Size));
+		}
+	}
+	else if (SelectedPreviewTexture)
+	{
+		DrawCircularTexture(SelectedPreviewTexture, PreviewCenter, PreviewSize);
+	}
+	return DrawLayer;
 }
 
 void UInventoryWidget::InitializePreviewSystem()
@@ -55,6 +316,7 @@ void UInventoryWidget::InitializePreviewSystem()
 	PreviewActors.SetNum(MaxPreviewSlots);
 	PreviewCaptures.SetNum(MaxPreviewSlots);
 	PreviewRenderTargets.SetNum(MaxPreviewSlots);
+	PreviewCaptureBaseLocations.SetNum(MaxPreviewSlots);
 
 	for (int32 i = 0; i < MaxPreviewSlots; ++i)
 	{
@@ -122,12 +384,19 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 			if (Capture)
 			{
 				Capture->AttachToComponent(PreviewActor->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
-				Capture->SetRelativeLocation(FVector(150.0f, 0.0f, 0.0f));
-				Capture->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
-				Capture->FOVAngle = 30.0f;
-				Capture->ProjectionType = ECameraProjectionMode::Perspective;
+				const FVector CameraLocation(150.0f, -150.0f, 100.0f);
+				Capture->SetRelativeLocation(CameraLocation);
+				Capture->SetRelativeRotation((-CameraLocation).Rotation());
+				Capture->ProjectionType = ECameraProjectionMode::Orthographic;
+				Capture->OrthoWidth = 120.0f;
 				Capture->TextureTarget = GetOrCreateRenderTarget(SlotIndex);
-				Capture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+				Capture->CaptureSource = ESceneCaptureSource::SCS_SceneColorHDR;
+				Capture->CompositeMode = SCCM_Overwrite;
+				Capture->ShowFlags.SetAtmosphere(false);
+				Capture->ShowFlags.SetCloud(false);
+				Capture->ShowFlags.SetFog(false);
+				Capture->ShowFlags.SetSkyLighting(false);
+				Capture->ShowFlags.SetVolumetricFog(false);
 				Capture->bCaptureEveryFrame = true;
 				Capture->bCaptureOnMovement = false;
 				Capture->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
@@ -144,7 +413,10 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 		{
 			UStaticMeshComponent* MeshComp = MeshActor->GetStaticMeshComponent();
 			MeshComp->SetMobility(EComponentMobility::Movable);
+			MeshActor->SetActorLocation(FVector(0.0f, 0.0f, -10000.0f));
 			MeshComp->SetStaticMesh(Mesh);
+			Capture->ClearShowOnlyComponents();
+			Capture->ShowOnlyComponent(MeshComp);
 
 			FBoxSphereBounds Bounds = Mesh->GetBounds();
 			float MaxDim = FMath::Max3(Bounds.BoxExtent.X, Bounds.BoxExtent.Y, Bounds.BoxExtent.Z);
@@ -153,8 +425,15 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 				float TargetSize = 80.0f;
 				float Scale = TargetSize / (MaxDim * 2.0f);
 				MeshActor->SetActorScale3D(FVector(Scale));
-				MeshActor->GetStaticMeshComponent()->SetRelativeLocation(-Bounds.Origin * Scale);
+
+				// SceneCapture is attached to this scaled component, so offset its relative position
+				// to aim at the mesh bounds center while keeping a fixed world-space camera distance.
+				const FVector CameraOffset(150.0f, -150.0f, 100.0f);
+				Capture->SetRelativeLocation(Bounds.Origin + CameraOffset / Scale);
+				Capture->SetRelativeRotation((-CameraOffset).Rotation());
+				PreviewCaptureBaseLocations[SlotIndex] = Capture->GetRelativeLocation();
 			}
+			Capture->CaptureScene();
 		}
 
 	}
@@ -176,12 +455,21 @@ void UInventoryWidget::UpdateItemPreviews()
 
 void UInventoryWidget::RotatePreviews(float DeltaTime)
 {
+	PreviewAnimationTime += DeltaTime;
 	float YawDelta = PreviewRotationSpeed * DeltaTime;
-	for (AActor* Actor : PreviewActors)
+	for (int32 Index = 0; Index < PreviewActors.Num(); ++Index)
 	{
+		AActor* Actor = PreviewActors[Index];
 		if (Actor && Actor->IsValidLowLevel())
 		{
 			Actor->AddActorWorldRotation(FRotator(0.0f, YawDelta, 0.0f));
+
+			if (PreviewCaptures.IsValidIndex(Index) && PreviewCaptures[Index] && PreviewCaptureBaseLocations.IsValidIndex(Index))
+			{
+				const float ActorScale = FMath::Max(Actor->GetActorScale3D().Z, KINDA_SMALL_NUMBER);
+				const float BobOffset = FMath::Sin(PreviewAnimationTime * 1.8f + Index * 0.7f) * PreviewFloatAmplitude;
+				PreviewCaptures[Index]->SetRelativeLocation(PreviewCaptureBaseLocations[Index] + FVector(0.0f, 0.0f, BobOffset / ActorScale));
+			}
 		}
 	}
 }
@@ -218,7 +506,12 @@ void UInventoryWidget::Open()
 	if (Inventory)
 	{
 		RebuildItemList();
-		UpdateSelectionVisual(Inventory->GetSelectedIndex());
+		const int32 SelectedIndex = Inventory->GetSelectedIndex();
+		AnimatedSelectionPosition = static_cast<float>(SelectedIndex);
+		TargetSelectionPosition = AnimatedSelectionPosition;
+		bSelectionAnimationInitialized = true;
+		UpdateSelectionVisual(SelectedIndex);
+		UpdateSelectedItemPreview(SelectedIndex);
 	}
 }
 
@@ -235,7 +528,35 @@ void UInventoryWidget::HandleItemsChanged()
 
 void UInventoryWidget::HandleSelectionChanged(int32 SelectedIndex)
 {
+	if (Inventory && Inventory->GetItems().IsValidIndex(SelectedIndex))
+	{
+		const float ItemCount = static_cast<float>(Inventory->GetItems().Num());
+		if (!bSelectionAnimationInitialized)
+		{
+			AnimatedSelectionPosition = static_cast<float>(SelectedIndex);
+			TargetSelectionPosition = AnimatedSelectionPosition;
+			bSelectionAnimationInitialized = true;
+		}
+		else if (ItemCount > 1.0f)
+		{
+			float CurrentTargetIndex = FMath::Fmod(TargetSelectionPosition, ItemCount);
+			if (CurrentTargetIndex < 0.0f) CurrentTargetIndex += ItemCount;
+			float Delta = static_cast<float>(SelectedIndex) - CurrentTargetIndex;
+			if (Delta > ItemCount * 0.5f) Delta -= ItemCount;
+			if (Delta < -ItemCount * 0.5f) Delta += ItemCount;
+			TargetSelectionPosition += Delta;
+		}
+		else
+		{
+			TargetSelectionPosition = static_cast<float>(SelectedIndex);
+		}
+	}
+	else
+	{
+		TargetSelectionPosition = static_cast<float>(SelectedIndex);
+	}
 	UpdateSelectionVisual(SelectedIndex);
+	UpdateSelectedItemPreview(SelectedIndex);
 	OnSelectionUpdated(SelectedIndex);
 }
 
@@ -277,6 +598,7 @@ void UInventoryWidget::RebuildItemList()
 	UpdateItemPreviews();
 	ApplyPreviewMaterialsToImages();
 	UpdateSelectionVisual(Inventory ? Inventory->GetSelectedIndex() : INDEX_NONE);
+	UpdateSelectedItemPreview(Inventory ? Inventory->GetSelectedIndex() : INDEX_NONE);
 
 	UE_LOG(LogTemp, Warning, TEXT("InventoryWidget: lista montada | filhos = %d | visibilidade = %d | no viewport = %d"), ItemsWrapBox->GetChildrenCount(), static_cast<int32>(GetVisibility()), IsInViewport() ? 1 : 0);
 
@@ -378,41 +700,34 @@ UVerticalBox* UInventoryWidget::CreateItemSlot(const FInventoryItem& Item, int32
 void UInventoryWidget::UpdateSelectionVisual(int32 NewSelectedIndex)
 {
 	if (!ItemsWrapBox) return;
+	const int32 NewChildIndex = VisibleItemIndices.IndexOfByKey(NewSelectedIndex);
+	const int32 ChildCount = ItemsWrapBox->GetChildrenCount();
+	const float CenteredSelectionOffset = NewChildIndex != INDEX_NONE
+		? (static_cast<float>(NewChildIndex) - (static_cast<float>(ChildCount) - 1.0f) * 0.5f) * 184.0f
+		: 0.0f;
 
-	if (LastSelectedIndex != INDEX_NONE && LastSelectedIndex >= 0 && LastSelectedIndex < ItemsWrapBox->GetChildrenCount())
+	for (int32 ChildIndex = 0; ChildIndex < ChildCount; ++ChildIndex)
 	{
-		UWidget* OldSlotWidget = ItemsWrapBox->GetChildAt(LastSelectedIndex);
-		if (UVerticalBox* OldContainer = Cast<UVerticalBox>(OldSlotWidget))
-		{
-			OldContainer->SetRenderTransform(FWidgetTransform(FVector2D(1.0f, 1.0f), FVector2D(1.0f, 1.0f), FVector2D::ZeroVector, 0.0f));
+		const int32 Distance = NewChildIndex == INDEX_NONE ? 1 : FMath::Abs(ChildIndex - NewChildIndex);
+		const float Scale = ChildIndex == NewChildIndex ? 1.15f : (Distance == 1 ? 0.86f : (Distance == 2 ? 0.68f : 0.54f));
+		const float Opacity = ChildIndex == NewChildIndex ? 1.0f : (Distance == 1 ? 0.78f : (Distance == 2 ? 0.52f : 0.30f));
+		UWidget* ChildWidget = ItemsWrapBox->GetChildAt(ChildIndex);
+		ChildWidget->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+		ChildWidget->SetRenderTransform(FWidgetTransform(
+			FVector2D(-CenteredSelectionOffset, static_cast<float>(Distance) * 7.0f),
+			FVector2D(Scale, Scale), FVector2D::ZeroVector, 0.0f));
+		ChildWidget->SetRenderOpacity(Opacity);
 
-			if (UPanelWidget* Panel = Cast<UPanelWidget>(OldContainer))
+		if (UVerticalBox* SlotContainer = Cast<UVerticalBox>(ChildWidget))
+		{
+			if (UPanelWidget* Panel = Cast<UPanelWidget>(SlotContainer))
 			{
 				if (UBorder* Border = Cast<UBorder>(Panel->GetChildAt(0)))
 				{
 					FSlateBrush Brush;
-					Brush.TintColor = FSlateColor(FLinearColor(0.08f, 0.08f, 0.1f, 1.0f));
-					Brush.ImageSize = FVector2D(100.0f, 100.0f);
-					Brush.DrawAs = ESlateBrushDrawType::Image;
-					Border->SetBrush(Brush);
-				}
-			}
-		}
-	}
-
-	if (NewSelectedIndex != INDEX_NONE && NewSelectedIndex >= 0 && NewSelectedIndex < ItemsWrapBox->GetChildrenCount())
-	{
-		UWidget* NewSlotWidget = ItemsWrapBox->GetChildAt(NewSelectedIndex);
-		if (UVerticalBox* NewContainer = Cast<UVerticalBox>(NewSlotWidget))
-		{
-			NewContainer->SetRenderTransform(FWidgetTransform(FVector2D(1.06f, 1.06f), FVector2D(1.06f, 1.06f), FVector2D::ZeroVector, 0.0f));
-
-			if (UPanelWidget* Panel = Cast<UPanelWidget>(NewContainer))
-			{
-				if (UBorder* Border = Cast<UBorder>(Panel->GetChildAt(0)))
-				{
-					FSlateBrush Brush;
-					Brush.TintColor = FSlateColor(FLinearColor(1.0f, 0.8f, 0.1f, 1.0f));
+					Brush.TintColor = FSlateColor(ChildIndex == NewChildIndex
+						? FLinearColor(1.0f, 0.8f, 0.1f, 1.0f)
+						: FLinearColor(0.08f, 0.08f, 0.1f, 1.0f));
 					Brush.ImageSize = FVector2D(100.0f, 100.0f);
 					Brush.DrawAs = ESlateBrushDrawType::Image;
 					Border->SetBrush(Brush);
@@ -422,4 +737,43 @@ void UInventoryWidget::UpdateSelectionVisual(int32 NewSelectedIndex)
 	}
 
 	LastSelectedIndex = NewSelectedIndex;
+}
+
+void UInventoryWidget::UpdateSelectedItemPreview(int32 SelectedIndex)
+{
+	SelectedPreviewTexture = nullptr;
+	if (!SelectedItemPreview || !Inventory || !Inventory->GetItems().IsValidIndex(SelectedIndex))
+	{
+		if (SelectedItemPreview) SelectedItemPreview->SetVisibility(ESlateVisibility::Collapsed);
+		if (SelectedItemName) SelectedItemName->SetText(FText::GetEmpty());
+		if (SelectedItemDescription) SelectedItemDescription->SetText(FText::GetEmpty());
+		return;
+	}
+
+	const FInventoryItem& Item = Inventory->GetItems()[SelectedIndex];
+	if (!Item.Data)
+	{
+		SelectedItemPreview->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+
+	SelectedItemPreview->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	SelectedItemPreview->SetBrush(FSlateBrush());
+	SelectedItemName->SetText(Item.Data->DisplayName);
+	SelectedItemDescription->SetText(Item.Data->Description);
+
+	if (Item.Data->InspectMesh && PreviewRenderTargets.IsValidIndex(SelectedIndex) && PreviewRenderTargets[SelectedIndex])
+	{
+		SelectedPreviewTexture = PreviewRenderTargets[SelectedIndex];
+		return;
+	}
+
+	if (Item.Data->Icon)
+	{
+		SelectedPreviewTexture = Item.Data->Icon;
+	}
+	else
+	{
+		SelectedItemPreview->SetVisibility(ESlateVisibility::Collapsed);
+	}
 }

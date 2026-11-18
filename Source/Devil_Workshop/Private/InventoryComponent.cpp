@@ -74,6 +74,19 @@ bool UInventoryComponent::GetEquippedItem(FInventoryItem& OutItem) const
 
 void UInventoryComponent::ClampSelection()
 {
+	if (SelectedInstanceId != INDEX_NONE)
+	{
+		const int32 PersistedIndex = FindItemIndex(SelectedInstanceId);
+		if (PersistedIndex != INDEX_NONE)
+		{
+			SelectedIndex = PersistedIndex;
+		}
+		else
+		{
+			SelectedInstanceId = INDEX_NONE;
+		}
+	}
+
 	const int32 MinIndex = bAllowEmptyHand ? INDEX_NONE : 0;
 	const int32 MaxIndex = Items.Num() - 1;
 
@@ -88,28 +101,42 @@ void UInventoryComponent::ClampSelection()
 		SelectedIndex = NewIndex;
 		OnSelectionChanged.Broadcast(SelectedIndex);
 	}
+
+	SelectedInstanceId = Items.IsValidIndex(SelectedIndex) ? Items[SelectedIndex].InstanceId : INDEX_NONE;
 }
 
 void UInventoryComponent::BeginSelection()
 {
-	SelectedIndex = FindItemIndex(EquippedInstanceId);
+	const int32 PersistedIndex = FindItemIndex(SelectedInstanceId);
+	if (PersistedIndex != INDEX_NONE)
+	{
+		SelectedIndex = PersistedIndex;
+	}
+	else
+	{
+		const int32 EquippedIndex = FindItemIndex(EquippedInstanceId);
+		SelectedIndex = EquippedIndex != INDEX_NONE ? EquippedIndex : (Items.IsEmpty() ? INDEX_NONE : 0);
+	}
 	ClampSelection();
 	OnSelectionChanged.Broadcast(SelectedIndex);
 }
 
 void UInventoryComponent::ScrollSelection(int32 Direction)
 {
-	const int32 MinIndex = bAllowEmptyHand ? INDEX_NONE : 0;
 	const int32 MaxIndex = Items.Num() - 1;
-	if (MaxIndex < MinIndex) return;
+	if (MaxIndex < 0 || Direction == 0) return;
 
-	const int32 Count = MaxIndex - MinIndex + 1;
 	const int32 Step = Direction > 0 ? 1 : -1;
+	if (!Items.IsValidIndex(SelectedIndex))
+	{
+		SelectedIndex = Step > 0 ? 0 : MaxIndex;
+	}
+	else
+	{
+		SelectedIndex = (SelectedIndex + Step + Items.Num()) % Items.Num();
+	}
 
-	int32 Offset = (SelectedIndex - MinIndex + Step) % Count;
-	if (Offset < 0) Offset += Count;
-
-	SelectedIndex = MinIndex + Offset;
+	SelectedInstanceId = Items.IsValidIndex(SelectedIndex) ? Items[SelectedIndex].InstanceId : INDEX_NONE;
 	OnSelectionChanged.Broadcast(SelectedIndex);
 }
 
@@ -126,6 +153,7 @@ void UInventoryComponent::ConfirmSelection()
 		EquippedInstanceId = NewEquipped;
 		OnEquippedChanged.Broadcast(EquippedInstanceId);
 	}
+	SelectedInstanceId = Items.IsValidIndex(SelectedIndex) ? Items[SelectedIndex].InstanceId : INDEX_NONE;
 }
 
 float UInventoryComponent::GetItemValue(int32 InstanceId, FName Key, float DefaultValue) const

@@ -86,6 +86,7 @@ protected:
 	TArray<FInventoryItem> Items;
 
 	int32 SelectedIndex = INDEX_NONE;
+	int32 SelectedInstanceId = INDEX_NONE;
 	int32 EquippedInstanceId = INDEX_NONE;
 	int32 NextInstanceId = 1;
 };
