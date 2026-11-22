@@ -12,9 +12,13 @@ class DEVIL_WORKSHOP_API UPrologueCompletedWidget : public UUserWidget
 {
 	GENERATED_BODY()
 
+public:
+	void FillViewport();
+	void SetFadeProgress(float BackgroundAlpha, float TextAlpha);
+	void SetCompletionText(const FText& Text);
+
 protected:
 	virtual void NativeConstruct() override;
-	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
 private:
 	UPROPERTY(Transient)
@@ -22,10 +26,4 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UTextBlock> CompletionText;
-
-	float ElapsedTime = 0.0f;
-	bool bPausedAtEnd = false;
-	float FadeDuration = 2.0f;
-	float TextFadeDelay = 0.8f;
-	float TextFadeDuration = 0.6f;
 };

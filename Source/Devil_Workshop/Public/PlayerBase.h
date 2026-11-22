@@ -3,11 +3,14 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
 #include "Components/TimelineComponent.h"
+#include "Engine/EngineTypes.h"
 #include "Monsters/MonsterTypes.h"
 #include "RepairStep.h"
 #include "PlayerBase.generated.h"
 
 class UCameraComponent;
+class UCapsuleComponent;
+class UPointLightComponent;
 class USceneComponent;
 class UPrimitiveComponent;
 class UInventoryComponent;
@@ -23,6 +26,7 @@ class USceneCaptureComponent2D;
 class URepairableComponent;
 class UTaskListWidget;
 class UPrologueCompletedWidget;
+class UCorridorReticleWidget;
 struct FInputActionValue;
 
 UCLASS(Blueprintable)
@@ -66,10 +70,16 @@ public:
 	TObjectPtr<USceneComponent> Root;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UCapsuleComponent> CorridorCollision;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UCameraComponent> Camera;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<USceneComponent> InspectionAnchor;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UPointLightComponent> InspectionLight;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UInventoryComponent> Inventory;
@@ -138,13 +148,13 @@ protected:
 	double EdgeLookMargin = 80.0;
 
 	UPROPERTY(EditAnywhere, Category = "Look")
-	double EdgeLookSpeed = 40.0;
+	double EdgePitchSpeed = 40.0;
 
 	UPROPERTY(EditAnywhere, Category = "Look")
 	double InspectRotateSpeed = 0.4;
 
 	UPROPERTY(EditAnywhere, Category = "Look")
-	double YawLimit = 30.0;
+	double LookRotationSpeed = 80.0;
 
 	UPROPERTY(EditAnywhere, Category = "Look")
 	double PitchMin = -40.0;
@@ -186,7 +196,7 @@ protected:
 	bool bIsActivelyRepairing = false;
 
 	UPROPERTY(EditAnywhere, Category = "Inspeção", meta = (EditCondition = "bBlurBackground", ClampMin = "0.05"))
-	float InspectionBlurFStop = 0.3f;
+	float InspectionBlurFStop = 5.6f;
 
 	UPROPERTY(EditAnywhere, Category = "Inspeção")
 	bool bDisableShadowDuringInspection = true;
@@ -199,6 +209,45 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Bob")
 	double BobAmplitude = 40.0;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.0"))
+	float CorridorMoveSpeed = 300.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.001"))
+	float CorridorMouseSensitivity = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.1"))
+	float CorridorLookSmoothSpeed = 18.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.1"))
+	float CorridorMoveAcceleration = 9.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.1"))
+	float CorridorMoveBraking = 12.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.0"))
+	float CorridorCameraHeightDrop = 25.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls")
+	bool bInvertCorridorMouseY = false;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.0", ClampMax = "89.0"))
+	float CorridorPitchLimit = 85.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.0"))
+	float CorridorSprintSpeed = 520.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.0"))
+	float CorridorCrouchSpeed = 150.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.0"))
+	float CorridorCrouchCameraDrop = 35.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "1.0"))
+	float CorridorCrouchCapsuleHalfHeight = 45.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.05"))
+	float CorridorFootstepNoiseInterval = 0.5f;
 
 public:
 	// Monster Reaction Delegates
@@ -228,11 +277,29 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	float MoveLength = 0.65f;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Timelines|Movimento", meta = (ClampMin = "1.0"))
+	float MoveSpeedUnitsPerSecond = 900.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Timelines|Movimento", meta = (ClampMin = "1.0"))
+	float MoveTurnDegreesPerSecond = 100.0f;
+
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	float CameraFocusLength = 0.35f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	float InspectLength = 0.5f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Inspection|Lighting", meta = (ClampMin = "0.0"))
+	float InspectionLightIntensity = 100.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Inspection|Lighting", meta = (ClampMin = "0.0"))
+	float InspectionLightRadius = 180.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Inspection|Lighting", meta = (ClampMin = "0.0"))
+	float InspectionLightSourceRadius = 60.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Inspection|Lighting")
+	FLinearColor InspectionLightColor = FLinearColor::White;
 
 	UPROPERTY()
 	TObjectPtr<APlayerController> CachedPlayerController;
@@ -246,9 +313,19 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UPrologueCompletedWidget> PrologueCompletedWidget;
 
+	TWeakObjectPtr<URepairableComponent> RepairableCompletionDelegateSource;
+
+	UPROPERTY()
+	TObjectPtr<UCorridorReticleWidget> CorridorReticleWidget;
+
 	bool bTaskListOpen = false;
 	bool bIgnoreGoBackUntilReleased = false;
 	bool bPrologueCompletionStarted = false;
+	bool bPrologueFadeActive = false;
+	float PrologueFadeElapsed = 0.0f;
+	float PrologueFadeDuration = 2.0f;
+	float PrologueTextFadeDelay = 0.8f;
+	float PrologueTextFadeDuration = 0.6f;
 
 	double LastInventoryScrollTime = -1000.0;
 
@@ -259,6 +336,25 @@ protected:
 	FVector TargetLocation = FVector::ZeroVector;
 	FRotator StartRotation = FRotator::ZeroRotator;
 	FRotator TargetRotation = FRotator::ZeroRotator;
+	FRotator StartCameraWorldRotation = FRotator::ZeroRotator;
+	int32 CameraMoveDebugId = 0;
+	FRotator PendingLookOffset = FRotator::ZeroRotator;
+	bool bRestoreLookOffsetOnMoveFinished = false;
+	TArray<FRotator> PositionLookHistory;
+	bool bIsInCorridor = false;
+	bool bChangeCorridorModeAfterMove = false;
+	bool bPendingCorridorMode = false;
+	bool bIgnoreNextCorridorMouseDelta = false;
+	bool bIsCorridorCrouched = false;
+	float CorridorFootstepNoiseTimer = 0.0f;
+	FVector CorridorCollisionRelativeLocation = FVector(0.0f, 0.0f, -69.0f);
+	FVector CorridorStandCameraRelativeLocation = FVector::ZeroVector;
+	FVector CorridorStandCollisionRelativeLocation = FVector(0.0f, 0.0f, -69.0f);
+	FVector CorridorVelocity = FVector::ZeroVector;
+	float CorridorTargetYawOffset = 0.0f;
+	float CorridorTargetPitchOffset = 0.0f;
+	float CorridorStandCapsuleHalfHeight = 65.0f;
+	float CorridorStandCapsuleRadius = 26.0f;
 
 	FVector FocusStartLocation = FVector::ZeroVector;
 	FVector FocusTargetLocation = FVector::ZeroVector;
@@ -278,6 +374,7 @@ protected:
 	bool bWorkingOnPart = false;
 	bool bInspectDragging = false;
 	TMap<TWeakObjectPtr<UPrimitiveComponent>, bool> InspectedShadowStates;
+	TMap<TWeakObjectPtr<UPrimitiveComponent>, FLightingChannels> InspectedLightingChannelStates;
 	FVector2D LastInspectMousePos = FVector2D::ZeroVector;
 
 	bool bExitingInspection = false;
@@ -290,6 +387,7 @@ protected:
 
 	void InitTimeline(FTimeline& Timeline, TObjectPtr<UCurveFloat>& Curve, float Length,
 		float DefaultEndTime, float DefaultEndValue, bool bSmooth, FName UpdateFn, FName FinishedFn);
+	void RestoreInspectionLightingChannels();
 
 	UFUNCTION()
 	void OnMoveUpdate(float Alpha);
@@ -330,6 +428,12 @@ protected:
 	void OnGoBackReleased();
 	void OnLook(const FInputActionValue& Value);
 	void OnPause();
+	void UpdateCorridorControls(float DeltaTime);
+	void SetCorridorCrouched(bool bCrouched);
+	void UpdateCorridorReticle();
+	bool IsCorridorInteractable(AActor* Actor) const;
+	void SetCorridorMode(bool bEnable);
+	bool TryUseCorridorDoor(AActor* DoorActor);
 
 	void UpdateCameraRotation();
 	void EnforceMinimumQuality();

@@ -1,7 +1,9 @@
 #include "PlayerBase.h"
 
 #include "Camera/CameraComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/ShapeComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -29,6 +31,7 @@
 #include "TaskListBoard.h"
 #include "TaskListWidget.h"
 #include "PrologueCompletedWidget.h"
+#include "CorridorReticleWidget.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -63,6 +66,14 @@ APlayerBase::APlayerBase()
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
 
+	CorridorCollision = CreateDefaultSubobject<UCapsuleComponent>(TEXT("CorridorCollision"));
+	CorridorCollision->SetupAttachment(Root);
+	CorridorCollision->SetCapsuleSize(26.0f, 65.0f);
+	CorridorCollision->SetRelativeLocation(CorridorCollisionRelativeLocation);
+	CorridorCollision->SetCollisionProfileName(TEXT("Pawn"));
+	CorridorCollision->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	CorridorCollision->SetGenerateOverlapEvents(false);
+
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(Root);
 	Camera->SetRelativeLocation(FVector::ZeroVector);
@@ -74,6 +85,13 @@ APlayerBase::APlayerBase()
 	InspectionAnchor->SetupAttachment(Camera);
 	InspectionAnchor->SetRelativeLocation(FVector(120.0, 0.0, 0.0));
 	InspectionAnchor->SetRelativeRotation(FRotator::ZeroRotator);
+
+	InspectionLight = CreateDefaultSubobject<UPointLightComponent>(TEXT("InspectionLight"));
+	InspectionLight->SetupAttachment(InspectionAnchor);
+	InspectionLight->SetMobility(EComponentMobility::Movable);
+	InspectionLight->SetRelativeLocation(FVector(-50.0, 0.0, 25.0));
+	InspectionLight->SetLightingChannels(false, true, false);
+	InspectionLight->SetVisibility(false);
 
 	Inventory = CreateDefaultSubobject<UInventoryComponent>(TEXT("Inventory"));
 }
@@ -125,6 +143,19 @@ void APlayerBase::BeginPlay()
 
 	DefaultCameraRelativeLocation = Camera->GetRelativeLocation();
 	DefaultCameraRelativeRotation = Camera->GetRelativeRotation();
+	CorridorStandCameraRelativeLocation = Camera->GetRelativeLocation() - FVector(0.0f, 0.0f, CorridorCameraHeightDrop);
+	if (CorridorCollision)
+	{
+		CorridorStandCollisionRelativeLocation = CorridorCollision->GetRelativeLocation();
+		CorridorStandCapsuleHalfHeight = CorridorCollision->GetUnscaledCapsuleHalfHeight();
+		CorridorStandCapsuleRadius = CorridorCollision->GetUnscaledCapsuleRadius();
+	}
+	InspectionLight->SetIntensity(InspectionLightIntensity);
+	InspectionLight->SetAttenuationRadius(InspectionLightRadius);
+	InspectionLight->SetSourceRadius(InspectionLightSourceRadius);
+	InspectionLight->SetLightColor(InspectionLightColor);
+	InspectionLight->SetLightingChannels(false, true, false);
+	InspectionLight->SetVisibility(false);
 
 	InspectionAnchor->SetRelativeLocation(FVector(InspectionDistance, 0.0, 0.0));
 	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: versao com clique via Enhanced Input na inspecao carregada (margem de borda = %.0f px, blur FStop = %.2f)"), EdgeLookMargin, InspectionBlurFStop);
@@ -153,6 +184,13 @@ void APlayerBase::BeginPlay()
 		UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(PC, nullptr, EMouseLockMode::LockAlways, false);
 		UGameplayStatics::SetGamePaused(this, false);
 
+		CorridorReticleWidget = CreateWidget<UCorridorReticleWidget>(PC, UCorridorReticleWidget::StaticClass());
+		if (CorridorReticleWidget)
+		{
+			CorridorReticleWidget->AddToViewport(50);
+			CorridorReticleWidget->SetVisibility(ESlateVisibility::Collapsed);
+		}
+
 		if (InventoryWidgetClass)
 		{
 			InventoryWidget = CreateWidget<UInventoryWidget>(PC, InventoryWidgetClass);
@@ -177,6 +215,22 @@ void APlayerBase::BeginPlay()
 void APlayerBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+	if (bPrologueFadeActive && PrologueCompletedWidget)
+	{
+		PrologueFadeElapsed += DeltaTime;
+		const float BackgroundAlpha = FMath::Clamp(PrologueFadeElapsed / PrologueFadeDuration, 0.0f, 1.0f);
+		const float TextAlpha = FMath::Clamp(
+			(PrologueFadeElapsed - PrologueTextFadeDelay) / PrologueTextFadeDuration,
+			0.0f,
+			1.0f);
+		PrologueCompletedWidget->SetFadeProgress(BackgroundAlpha, TextAlpha);
+
+		if (BackgroundAlpha >= 1.0f && TextAlpha >= 1.0f)
+		{
+			bPrologueFadeActive = false;
+			UE_LOG(LogTemp, Warning, TEXT("PlayerBase: fade de conclusao terminou; jogo segue em execucao."));
+		}
+	}
 
 	// A lista bloqueia o controle do jogador sem pausar o restante do mundo.
 	if (bTaskListOpen)
@@ -202,7 +256,11 @@ void APlayerBase::Tick(float DeltaTime)
 
 	if (!CachedPlayerController) return;
 
-	if (!IsTransitioning && !isInspecting && !bIsCameraFocused && !bInventoryOpen)
+	if (bIsInCorridor && !IsTransitioning && !isInspecting && !bIsCameraFocused && !bInventoryOpen && !bTaskListOpen)
+	{
+		UpdateCorridorControls(DeltaTime);
+	}
+	else if (!bIsInCorridor && !IsTransitioning && !isInspecting && !bIsCameraFocused && !bInventoryOpen)
 	{
 		float MouseX = 0.f;
 		float MouseY = 0.f;
@@ -214,20 +272,20 @@ void APlayerBase::Tick(float DeltaTime)
 
 		if (MouseX < EdgeLookMargin)
 		{
-			ApplyLookDelta(EdgeLookSpeed * -1.0 * DeltaTime);
+			ApplyLookDelta(LookRotationSpeed * -1.0 * DeltaTime);
 		}
 		else if (MouseX > SizeX - EdgeLookMargin)
 		{
-			ApplyLookDelta(EdgeLookSpeed * DeltaTime);
+			ApplyLookDelta(LookRotationSpeed * DeltaTime);
 		}
 
 		if (MouseY < EdgeLookMargin)
 		{
-			ApplyLookPitchDelta(DeltaTime * EdgeLookSpeed);
+			ApplyLookPitchDelta(DeltaTime * EdgePitchSpeed);
 		}
 		else if (MouseY > SizeY - EdgeLookMargin)
 		{
-			ApplyLookPitchDelta(DeltaTime * EdgeLookSpeed * -1.0);
+			ApplyLookPitchDelta(DeltaTime * EdgePitchSpeed * -1.0);
 		}
 	}
 	else if (isInspecting)
@@ -256,7 +314,7 @@ void APlayerBase::UpdateCameraRotation()
 
 void APlayerBase::ApplyLookDelta(double Delta)
 {
-	LookYawOffset = FMath::Clamp(LookYawOffset + Delta, -YawLimit, YawLimit);
+	LookYawOffset += Delta;
 	UpdateCameraRotation();
 }
 
@@ -268,10 +326,10 @@ void APlayerBase::ApplyLookPitchDelta(double Delta)
 
 void APlayerBase::OnLook(const FInputActionValue& Value)
 {
-	if (isInspecting || IsTransitioning || bIsCameraFocused || bInventoryOpen || bTaskListOpen) return;
+	if (bIsInCorridor || isInspecting || IsTransitioning || bIsCameraFocused || bInventoryOpen || bTaskListOpen) return;
 
 	const double Dt = GetWorld()->GetDeltaSeconds();
-	LookYawOffset = FMath::Clamp(LookYawOffset + static_cast<double>(Value.Get<float>()) * Dt * 60.0, -YawLimit, YawLimit);
+	LookYawOffset += static_cast<double>(Value.Get<float>()) * Dt * LookRotationSpeed;
 	UpdateCameraRotation();
 }
 
@@ -336,7 +394,12 @@ void APlayerBase::OnClick()
 
 	FVector WorldOrigin;
 	FVector WorldDirection;
-	if (!CachedPlayerController->DeprojectMousePositionToWorld(WorldOrigin, WorldDirection))
+	if (bIsInCorridor)
+	{
+		WorldOrigin = Camera->GetComponentLocation();
+		WorldDirection = Camera->GetForwardVector();
+	}
+	else if (!CachedPlayerController->DeprojectMousePositionToWorld(WorldOrigin, WorldDirection))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Click: falhou o Deproject do mouse"));
 		return;
@@ -362,6 +425,12 @@ void APlayerBase::OnClick()
 		if (!HitActor) break;
 
 		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
+
+		if (HitActor->ActorHasTag(TEXT("CorridorDoor")))
+		{
+			TryUseCorridorDoor(HitActor);
+			return;
+		}
 
 		if (Cast<ATaskListBoard>(HitActor))
 		{
@@ -441,6 +510,7 @@ void APlayerBase::OnClick()
 		ReportGameplayNoise(FName(TEXT("Noise.Event.Footstep.Walk")), 0.7f, 2000.0f);
 		CurrentAreaActor = FallbackClickable;
 		PositionHistory.Add(GetActorTransform());
+		PositionLookHistory.Add(FRotator(LookPitchOffset, LookYawOffset, 0.0));
 		MoveToPosition(FallbackClickable->GetActorTransform());
 	}
 }
@@ -457,6 +527,292 @@ void APlayerBase::ReportGameplayNoise(FName NoiseTagName, float Loudness, float 
 	NoiseEvent.Instigator = this;
 	NoiseEvent.Timestamp = GetWorld()->GetTimeSeconds();
 	OnPlayerMadeNoise.Broadcast(NoiseEvent);
+}
+
+void APlayerBase::UpdateCorridorControls(float DeltaTime)
+{
+	if (!CachedPlayerController || DeltaTime <= 0.0f) return;
+
+	float MouseDeltaX = 0.0f;
+	float MouseDeltaY = 0.0f;
+	CachedPlayerController->GetInputMouseDelta(MouseDeltaX, MouseDeltaY);
+	if (bIgnoreNextCorridorMouseDelta)
+	{
+		bIgnoreNextCorridorMouseDelta = false;
+		MouseDeltaX = 0.0f;
+		MouseDeltaY = 0.0f;
+	}
+
+	// Accumulate raw mouse motion, then ease the view toward it for smooth aiming.
+	CorridorTargetYawOffset += MouseDeltaX * CorridorMouseSensitivity;
+	const float PitchSign = bInvertCorridorMouseY ? -1.0f : 1.0f;
+	CorridorTargetPitchOffset = FMath::Clamp(
+		CorridorTargetPitchOffset + MouseDeltaY * CorridorMouseSensitivity * PitchSign,
+		-CorridorPitchLimit,
+		CorridorPitchLimit);
+	LookYawOffset = FMath::FInterpTo(
+		static_cast<float>(LookYawOffset), CorridorTargetYawOffset, DeltaTime, CorridorLookSmoothSpeed);
+	LookPitchOffset = FMath::FInterpTo(
+		static_cast<float>(LookPitchOffset), CorridorTargetPitchOffset, DeltaTime, CorridorLookSmoothSpeed);
+	UpdateCameraRotation();
+	UpdateCorridorReticle();
+
+	const bool bCrouchPressed = CachedPlayerController->IsInputKeyDown(EKeys::LeftControl)
+		|| CachedPlayerController->IsInputKeyDown(EKeys::RightControl);
+	SetCorridorCrouched(bCrouchPressed);
+
+	float ForwardInput = 0.0f;
+	float RightInput = 0.0f;
+	ForwardInput += CachedPlayerController->IsInputKeyDown(EKeys::W) ? 1.0f : 0.0f;
+	ForwardInput -= CachedPlayerController->IsInputKeyDown(EKeys::S) ? 1.0f : 0.0f;
+	RightInput += CachedPlayerController->IsInputKeyDown(EKeys::D) ? 1.0f : 0.0f;
+	RightInput -= CachedPlayerController->IsInputKeyDown(EKeys::A) ? 1.0f : 0.0f;
+
+	FVector Forward = Camera->GetForwardVector();
+	FVector Right = Camera->GetRightVector();
+	Forward.Z = 0.0f;
+	Right.Z = 0.0f;
+	Forward.Normalize();
+	Right.Normalize();
+	FVector MoveDirection = Forward * ForwardInput + Right * RightInput;
+	MoveDirection = MoveDirection.GetClampedToMaxSize(1.0f);
+
+	const bool bSprintPressed = CachedPlayerController->IsInputKeyDown(EKeys::LeftShift)
+		|| CachedPlayerController->IsInputKeyDown(EKeys::RightShift);
+	const float CurrentMoveSpeed = bIsCorridorCrouched
+		? CorridorCrouchSpeed
+		: (bSprintPressed ? CorridorSprintSpeed : CorridorMoveSpeed);
+	const FVector DesiredVelocity = MoveDirection * CurrentMoveSpeed;
+	const float MovementResponse = MoveDirection.IsNearlyZero()
+		? CorridorMoveBraking
+		: CorridorMoveAcceleration;
+	CorridorVelocity = FMath::VInterpTo(CorridorVelocity, DesiredVelocity, DeltaTime, MovementResponse);
+	const FVector MoveDelta = CorridorVelocity * DeltaTime;
+
+	FVector AppliedDelta = MoveDelta;
+	if (CorridorCollision)
+	{
+		const FVector CapsuleStartLocation = CorridorCollision->GetComponentLocation();
+		const FVector SavedRelativeLocation = CorridorCollision->GetRelativeLocation();
+		const FQuat SweepRotation = CorridorCollision->GetComponentQuat();
+		FHitResult Hit;
+		CorridorCollision->MoveComponent(MoveDelta, SweepRotation, true, &Hit);
+
+		if (Hit.IsValidBlockingHit())
+		{
+			const FVector RemainingDelta = MoveDelta * (1.0f - Hit.Time);
+			const FVector SlideDelta = FVector::VectorPlaneProject(RemainingDelta, Hit.ImpactNormal);
+			if (!SlideDelta.IsNearlyZero())
+			{
+				FHitResult SlideHit;
+				CorridorCollision->MoveComponent(SlideDelta, SweepRotation, true, &SlideHit);
+			}
+		}
+
+		AppliedDelta = CorridorCollision->GetComponentLocation() - CapsuleStartLocation;
+		CorridorCollision->SetRelativeLocation(SavedRelativeLocation, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+
+	AddActorWorldOffset(AppliedDelta, false);
+
+	if (!AppliedDelta.IsNearlyZero())
+	{
+		CorridorFootstepNoiseTimer += DeltaTime;
+		if (CorridorFootstepNoiseTimer >= CorridorFootstepNoiseInterval)
+		{
+			ReportGameplayNoise(FName(TEXT("Noise.Event.Footstep.Walk")), 0.7f, 2000.0f);
+			CorridorFootstepNoiseTimer = 0.0f;
+		}
+	}
+}
+
+void APlayerBase::SetCorridorCrouched(bool bCrouched)
+{
+	if (bIsCorridorCrouched == bCrouched || !Camera)
+	{
+		return;
+	}
+
+	bIsCorridorCrouched = bCrouched;
+	if (bCrouched)
+	{
+		const float NewHalfHeight = FMath::Clamp(
+			CorridorCrouchCapsuleHalfHeight,
+			CorridorCollision ? CorridorCollision->GetUnscaledCapsuleRadius() : 1.0f,
+			CorridorStandCapsuleHalfHeight);
+		const float HeightDifference = CorridorStandCapsuleHalfHeight - NewHalfHeight;
+
+		if (CorridorCollision)
+		{
+			CorridorCollision->SetCapsuleSize(
+				CorridorCollision->GetUnscaledCapsuleRadius(), NewHalfHeight, true);
+			CorridorCollision->SetRelativeLocation(
+				CorridorStandCollisionRelativeLocation - FVector(0.0f, 0.0f, HeightDifference));
+		}
+
+		Camera->SetRelativeLocation(
+			CorridorStandCameraRelativeLocation - FVector(0.0f, 0.0f, CorridorCrouchCameraDrop));
+	}
+	else
+	{
+		if (CorridorCollision)
+		{
+			CorridorCollision->SetCapsuleSize(
+				CorridorCollision->GetUnscaledCapsuleRadius(), CorridorStandCapsuleHalfHeight, true);
+			CorridorCollision->SetRelativeLocation(CorridorStandCollisionRelativeLocation);
+		}
+		Camera->SetRelativeLocation(CorridorStandCameraRelativeLocation);
+	}
+}
+
+bool APlayerBase::IsCorridorInteractable(AActor* Actor) const
+{
+	if (!IsValid(Actor)) return false;
+
+	if (Cast<AItemPickup>(Actor)
+		|| Cast<ABatteryCharger>(Actor)
+		|| Cast<ATaskListBoard>(Actor)
+		|| Actor->ActorHasTag(TEXT("CorridorDoor"))
+		|| Actor->ActorHasTag(TEXT("Inspectable"))
+		|| Actor->ActorHasTag(TEXT("CameraFocus"))
+		|| Actor->ActorHasTag(TEXT("Door")))
+	{
+		return true;
+	}
+
+	if (Actor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass()) && Inventory)
+	{
+		FInventoryItem Equipped;
+		if (Inventory->GetEquippedItem(Equipped)
+			&& IItemUseTarget::Execute_CanUseItem(Actor, Equipped))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void APlayerBase::UpdateCorridorReticle()
+{
+	if (!CorridorReticleWidget || !GetWorld() || !Camera) return;
+
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CorridorReticleTrace), true);
+	Params.AddIgnoredActor(this);
+
+	const FVector Start = Camera->GetComponentLocation();
+	const FVector End = Start + Camera->GetForwardVector() * 100000.0f;
+	AActor* TargetActor = nullptr;
+
+	// Match the click trace: clickable navigation markers can be skipped, while
+	// solid non-interactive objects still block targets behind them.
+	for (int32 Attempt = 0; Attempt < 8; ++Attempt)
+	{
+		if (!GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+		{
+			break;
+		}
+
+		AActor* HitActor = Hit.GetActor();
+		if (!HitActor) break;
+
+		if (IsCorridorInteractable(HitActor))
+		{
+			TargetActor = HitActor;
+			break;
+		}
+
+		if (HitActor->ActorHasTag(TEXT("Clickable")))
+		{
+			Params.AddIgnoredActor(HitActor);
+			continue;
+		}
+
+		break;
+	}
+
+	CorridorReticleWidget->SetHasInteractableTarget(TargetActor != nullptr);
+}
+
+void APlayerBase::SetCorridorMode(bool bEnable)
+{
+	SetCorridorCrouched(false);
+	bIsInCorridor = bEnable;
+	CorridorFootstepNoiseTimer = 0.0f;
+	CorridorVelocity = FVector::ZeroVector;
+	CorridorTargetYawOffset = static_cast<float>(LookYawOffset);
+	CorridorTargetPitchOffset = static_cast<float>(LookPitchOffset);
+	bIgnoreNextCorridorMouseDelta = bEnable;
+	if (Camera)
+	{
+		Camera->SetRelativeLocation(bEnable ? CorridorStandCameraRelativeLocation : DefaultCameraRelativeLocation);
+	}
+	if (CorridorCollision)
+	{
+		CorridorCollision->SetCapsuleSize(
+			CorridorStandCapsuleRadius, CorridorStandCapsuleHalfHeight, true);
+		CorridorCollision->SetRelativeLocation(CorridorStandCollisionRelativeLocation);
+		CorridorCollision->SetCollisionEnabled(
+			bEnable ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+	}
+	if (!CachedPlayerController) return;
+	if (CorridorReticleWidget)
+	{
+		CorridorReticleWidget->SetVisibility(
+			bEnable ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		CorridorReticleWidget->SetHasInteractableTarget(false);
+	}
+
+	CachedPlayerController->bShowMouseCursor = !bEnable;
+	if (bEnable)
+	{
+		UWidgetBlueprintLibrary::SetInputMode_GameOnly(CachedPlayerController);
+		int32 ViewportWidth = 0;
+		int32 ViewportHeight = 0;
+		CachedPlayerController->GetViewportSize(ViewportWidth, ViewportHeight);
+		if (ViewportWidth > 0 && ViewportHeight > 0)
+		{
+			CachedPlayerController->SetMouseLocation(ViewportWidth / 2, ViewportHeight / 2);
+		}
+	}
+	else
+	{
+		UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(
+			CachedPlayerController, nullptr, EMouseLockMode::LockAlways, false);
+	}
+}
+
+bool APlayerBase::TryUseCorridorDoor(AActor* DoorActor)
+{
+	if (!DoorActor || IsTransitioning) return false;
+
+	const bool bEnteringCorridor = !bIsInCorridor;
+	const FName DestinationTag = bEnteringCorridor
+		? FName(TEXT("CorridorEntryPosition"))
+		: FName(TEXT("WorkshopStartPosition"));
+	TArray<AActor*> Destinations;
+	UGameplayStatics::GetAllActorsWithTag(this, DestinationTag, Destinations);
+	if (Destinations.IsEmpty())
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("PlayerBase: porta '%s' sem destino. Adicione a tag '%s' ao ator de posição correspondente."),
+			*DoorActor->GetName(), *DestinationTag.ToString());
+		return false;
+	}
+
+	OnPlayerClosedDoor.Broadcast(DoorActor);
+	PositionHistory.Reset();
+	PositionLookHistory.Reset();
+	CurrentAreaActor = nullptr;
+	bPendingCorridorMode = bEnteringCorridor;
+	bChangeCorridorModeAfterMove = true;
+	if (!bEnteringCorridor && CorridorReticleWidget)
+	{
+		CorridorReticleWidget->SetVisibility(ESlateVisibility::Collapsed);
+	}
+	MoveToPosition(Destinations[0]->GetActorTransform());
+	return true;
 }
 
 void APlayerBase::TryUseItemOnPart()
@@ -621,8 +977,13 @@ void APlayerBase::OnGoBack()
 
 	const FTransform Last = PositionHistory.Last();
 	PositionHistory.RemoveAt(PositionHistory.Num() - 1);
+	const FRotator LastLookOffset = PositionLookHistory.IsEmpty()
+		? FRotator::ZeroRotator
+		: PositionLookHistory.Pop();
 	CurrentAreaActor = nullptr;
 	MoveToPosition(Last);
+	PendingLookOffset = LastLookOffset;
+	bRestoreLookOffsetOnMoveFinished = true;
 }
 
 void APlayerBase::OnGoBackReleased()
@@ -632,19 +993,46 @@ void APlayerBase::OnGoBackReleased()
 
 void APlayerBase::MoveToPosition(const FTransform& Target)
 {
+	bRestoreLookOffsetOnMoveFinished = false;
+	PendingLookOffset = FRotator::ZeroRotator;
+
 	CameraFocusTimeline.Stop();
 	bIsCameraFocused = false;
 	bExitingCameraFocus = false;
 
+	// Preserve the view direction the player currently sees. The camera is attached
+	// to the pawn, so cache world rotation before the pawn starts turning.
+	StartCameraWorldRotation = Camera->GetComponentRotation();
 	LookPitchOffset = 0.0;
 	LookYawOffset = 0.0;
 	Camera->SetRelativeLocation(DefaultCameraRelativeLocation);
-	Camera->SetRelativeRotation(FRotator::ZeroRotator);
 
 	StartLocation = GetActorLocation();
 	StartRotation = GetActorRotation();
 	TargetLocation = Target.GetLocation();
 	TargetRotation = Target.Rotator();
+	++CameraMoveDebugId;
+	const float MoveDistance = FVector::Distance(StartLocation, TargetLocation);
+	const float TurnAngleDegrees = FMath::RadiansToDegrees(
+		StartRotation.Quaternion().AngularDistance(TargetRotation.Quaternion()));
+	const float DistanceDuration = MoveDistance / FMath::Max(MoveSpeedUnitsPerSecond, 1.0f);
+	const float RotationDuration = TurnAngleDegrees / FMath::Max(MoveTurnDegreesPerSecond, 1.0f);
+	const float EffectiveMoveDuration = FMath::Max(MoveLength, FMath::Max(DistanceDuration, RotationDuration));
+	const float TimelinePlayRate = MoveLength / EffectiveMoveDuration;
+	MoveTimeline.SetPlayRate(TimelinePlayRate);
+	UE_LOG(LogTemp, Warning,
+		TEXT("[CameraMove %d] START | Area=%s | Distance=%.1f | Turn=%.1fdeg | Duration=%.2fs | PlayRate=%.3f | StartLoc=%s | TargetLoc=%s | StartRot=%s | TargetRot=%s | CameraWorldRot=%s"),
+		CameraMoveDebugId,
+		CurrentAreaActor ? *CurrentAreaActor->GetName() : TEXT("HistoryOrManual"),
+		MoveDistance,
+		TurnAngleDegrees,
+		EffectiveMoveDuration,
+		TimelinePlayRate,
+		*StartLocation.ToString(),
+		*TargetLocation.ToString(),
+		*StartRotation.ToString(),
+		*TargetRotation.ToString(),
+		*StartCameraWorldRotation.ToString());
 
 	IsTransitioning = true;
 	MoveTimeline.PlayFromStart();
@@ -653,19 +1041,62 @@ void APlayerBase::MoveToPosition(const FTransform& Target)
 void APlayerBase::OnMoveUpdate(float Alpha)
 {
 	const float ClampedAlpha = FMath::Clamp(Alpha, 0.f, 1.f);
+	const FRotator InterpolatedRotation = UKismetMathLibrary::RLerp(StartRotation, TargetRotation, ClampedAlpha, true);
+	FRotator TargetCameraWorldRotation = TargetRotation;
+	if (bRestoreLookOffsetOnMoveFinished)
+	{
+		TargetCameraWorldRotation += PendingLookOffset;
+	}
+	const FRotator InterpolatedCameraWorldRotation = UKismetMathLibrary::RLerp(
+		StartCameraWorldRotation, TargetCameraWorldRotation, ClampedAlpha, true);
 
 	SetActorLocationAndRotation(
 		FMath::Lerp(StartLocation, TargetLocation, ClampedAlpha),
-		UKismetMathLibrary::RLerp(StartRotation, TargetRotation, ClampedAlpha, false));
+		InterpolatedRotation);
+	Camera->SetWorldRotation(InterpolatedCameraWorldRotation);
 
 	const double Z = FMath::Sin(ClampedAlpha * BobFrequency * UE_DOUBLE_PI) * BobAmplitude;
 	Camera->SetRelativeLocation(DefaultCameraRelativeLocation + FVector(0.0, 0.0, Z));
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[CameraMove %d] UPDATE | RawAlpha=%.4f | Alpha=%.4f | ActorLoc=%s | ActorRot=%s | InterpRot=%s | CameraRelLoc=%s | CameraWorldRot=%s | InterpCameraWorldRot=%s | BobZ=%.2f"),
+		CameraMoveDebugId,
+		Alpha,
+		ClampedAlpha,
+		*GetActorLocation().ToString(),
+		*GetActorRotation().ToString(),
+		*InterpolatedRotation.ToString(),
+		*Camera->GetRelativeLocation().ToString(),
+		*Camera->GetComponentRotation().ToString(),
+		*InterpolatedCameraWorldRotation.ToString(),
+		Z);
 }
 
 void APlayerBase::OnMoveFinished()
 {
 	SetActorLocationAndRotation(TargetLocation, TargetRotation);
 	Camera->SetRelativeLocation(DefaultCameraRelativeLocation);
+	Camera->SetWorldRotation(TargetRotation);
+	if (bRestoreLookOffsetOnMoveFinished)
+	{
+		LookPitchOffset = PendingLookOffset.Pitch;
+		LookYawOffset = PendingLookOffset.Yaw;
+		UpdateCameraRotation();
+		bRestoreLookOffsetOnMoveFinished = false;
+	}
+	if (bChangeCorridorModeAfterMove)
+	{
+		SetCorridorMode(bPendingCorridorMode);
+		bChangeCorridorModeAfterMove = false;
+	}
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[CameraMove %d] FINISHED | ActorLoc=%s | ActorRot=%s | CameraRelLoc=%s | CameraWorldRot=%s"),
+		CameraMoveDebugId,
+		*GetActorLocation().ToString(),
+		*GetActorRotation().ToString(),
+		*Camera->GetRelativeLocation().ToString(),
+		*Camera->GetComponentRotation().ToString());
 
 	IsTransitioning = false;
 }
@@ -742,6 +1173,7 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 
 	InspectedObject = TargetObject;
 	isInspecting = true;
+	InspectionLight->SetVisibility(true);
 	IsTransitioning = true;
 	bExitingInspection = false;
 	bInspectDragging = false;
@@ -815,6 +1247,18 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 		}
 	}
 
+	InspectedLightingChannelStates.Reset();
+	TArray<UPrimitiveComponent*> LightingPrimitives;
+	TargetObject->GetComponents<UPrimitiveComponent>(LightingPrimitives);
+	for (UPrimitiveComponent* Primitive : LightingPrimitives)
+	{
+		if (!Primitive || !Primitive->IsRegistered()) continue;
+
+		const FLightingChannels PreviousChannels = Primitive->LightingChannels;
+		InspectedLightingChannelStates.Add(Primitive, PreviousChannels);
+		Primitive->SetLightingChannels(PreviousChannels.bChannel0, true, PreviousChannels.bChannel2);
+	}
+
 	InspectTimeline.PlayFromStart();
 
 	SetPartsInteractable(TargetObject, true);
@@ -827,6 +1271,8 @@ void APlayerBase::ExitInspection()
 	if (!InspectedObject)
 	{
 		isInspecting = false;
+		InspectionLight->SetVisibility(false);
+		RestoreInspectionLightingChannels();
 		ClearInspectionBlur();
 		return;
 	}
@@ -959,9 +1405,11 @@ void APlayerBase::OnInspectFinished()
 			}
 		}
 		InspectedShadowStates.Reset();
+		RestoreInspectionLightingChannels();
 
 		InspectedObject = nullptr;
 		isInspecting = false;
+		InspectionLight->SetVisibility(false);
 		bInspectDragging = false;
 
 		InspectionAnchor->SetRelativeLocation(FVector(InspectionDistance, 0.0, 0.0));
@@ -969,6 +1417,19 @@ void APlayerBase::OnInspectFinished()
 
 		ClearInspectionBlur();
 	}
+}
+
+void APlayerBase::RestoreInspectionLightingChannels()
+{
+	for (const TPair<TWeakObjectPtr<UPrimitiveComponent>, FLightingChannels>& Entry : InspectedLightingChannelStates)
+	{
+		if (UPrimitiveComponent* Primitive = Entry.Key.Get())
+		{
+			const FLightingChannels& Channels = Entry.Value;
+			Primitive->SetLightingChannels(Channels.bChannel0, Channels.bChannel1, Channels.bChannel2);
+		}
+	}
+	InspectedLightingChannelStates.Reset();
 }
 
 void APlayerBase::UpdateInspectionBlur(float Alpha)
@@ -981,7 +1442,9 @@ void APlayerBase::UpdateInspectionBlur(float Alpha)
 
 	PP.DepthOfFieldFocalDistance = static_cast<float>(InspectionAnchor->GetRelativeLocation().X);
 
-	const float InvFStop = FMath::Lerp(1.f / 32.f, 1.f / FMath::Max(InspectionBlurFStop, 0.05f), Alpha);
+	// Keep a deeper focus range so the inspected object's near and far surfaces stay legible.
+	const float EffectiveFStop = FMath::Max(InspectionBlurFStop, 5.6f);
+	const float InvFStop = FMath::Lerp(1.f / 32.f, 1.f / EffectiveFStop, Alpha);
 	PP.DepthOfFieldFstop = 1.f / InvFStop;
 
 	Camera->PostProcessBlendWeight = 1.f;
@@ -1115,14 +1578,34 @@ void APlayerBase::OnTaskListCloseRequested()
 
 void APlayerBase::ShowPrologueCompleted()
 {
-	if (bPrologueCompletionStarted || !CachedPlayerController) return;
-	bPrologueCompletionStarted = true;
+	if (bPrologueCompletionStarted) return;
+	if (!CachedPlayerController)
+	{
+		UE_LOG(LogTemp, Error, TEXT("PlayerBase: nao foi possivel mostrar a conclusao; PlayerController nulo."));
+		return;
+	}
 
 	PrologueCompletedWidget = CreateWidget<UPrologueCompletedWidget>(CachedPlayerController, UPrologueCompletedWidget::StaticClass());
-	if (PrologueCompletedWidget)
+	if (!PrologueCompletedWidget)
 	{
-		PrologueCompletedWidget->AddToViewport(1000);
+		UE_LOG(LogTemp, Error, TEXT("PlayerBase: CreateWidget falhou para a tela de conclusao."));
+		return;
 	}
+
+	PrologueCompletedWidget->AddToViewport(1000);
+	PrologueCompletedWidget->FillViewport();
+	PrologueCompletedWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+	PrologueCompletedWidget->SetCompletionText(FText::FromString(TEXT("Dia 1 conclu\u00EDdo!")));
+	PrologueCompletedWidget->SetFadeProgress(0.0f, 0.0f);
+
+	bPrologueCompletionStarted = true;
+	bPrologueFadeActive = true;
+	PrologueFadeElapsed = 0.0f;
+	bClickHeld = false;
+	IsTransitioning = true;
+	CachedPlayerController->bShowMouseCursor = false;
+	UWidgetBlueprintLibrary::SetInputMode_GameOnly(CachedPlayerController);
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: tela 'Dia 1 concluido!' adicionada; iniciando fade preto."));
 }
 
 // --- Novo Sistema de Reparo Data-Driven ---
@@ -1220,8 +1703,9 @@ void APlayerBase::StartRepairInteraction(URepairableComponent* Repairable)
 	// Bind delegates
 	if (CurrentRepairableComponent)
 	{
-		CurrentRepairableComponent->OnStepCompleted.AddDynamic(this, &APlayerBase::OnRepairStepCompleted);
-		CurrentRepairableComponent->OnAllRepairsCompleted.AddDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+		CurrentRepairableComponent->OnStepCompleted.AddUniqueDynamic(this, &APlayerBase::OnRepairStepCompleted);
+		CurrentRepairableComponent->OnAllRepairsCompleted.AddUniqueDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+		RepairableCompletionDelegateSource = CurrentRepairableComponent;
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("PlayerBase: Iniciado reparo em '%s'"), *InspectedObject->GetName());
@@ -1239,7 +1723,8 @@ void APlayerBase::StopRepairInteraction()
 		CurrentRepairableComponent->StopRepair();
 
 		CurrentRepairableComponent->OnStepCompleted.RemoveDynamic(this, &APlayerBase::OnRepairStepCompleted);
-		CurrentRepairableComponent->OnAllRepairsCompleted.RemoveDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+		// Keep the completion delegate subscribed: UpdateRepairProgress can broadcast
+		// completion immediately after the input release stops the active repair.
 	}
 
 	CurrentRepairableComponent = nullptr;
@@ -1261,7 +1746,13 @@ void APlayerBase::OnRepairStepCompleted(const FRepairStep& Step)
 
 void APlayerBase::OnAllRepairsCompleted()
 {
-	UE_LOG(LogTemp, Log, TEXT("PlayerBase: TODOS OS REPAROS COMPLETOS em '%s'!"), *InspectedObject->GetName());
+	if (URepairableComponent* CompletionSource = RepairableCompletionDelegateSource.Get())
+	{
+		CompletionSource->OnAllRepairsCompleted.RemoveDynamic(this, &APlayerBase::OnAllRepairsCompleted);
+	}
+	RepairableCompletionDelegateSource.Reset();
+
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: TODOS OS REPAROS COMPLETOS em '%s'!"), *GetNameSafe(InspectedObject));
 
 	StopRepairInteraction();
 	ShowPrologueCompleted();

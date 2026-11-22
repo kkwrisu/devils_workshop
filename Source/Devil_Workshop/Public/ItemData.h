@@ -6,6 +6,8 @@
 
 class UTexture2D;
 class UStaticMesh;
+class USkeletalMesh;
+class UMaterialInterface;
 
 UCLASS(BlueprintType)
 class UItemData : public UPrimaryDataAsset
@@ -27,6 +29,14 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
 	TObjectPtr<UStaticMesh> InspectMesh;
+
+	/** Optional skeletal mesh used by the inventory 3D preview. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Preview")
+	TObjectPtr<USkeletalMesh> InspectSkeletalMesh;
+
+	/** Optional per-slot material overrides for either inspect mesh. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Preview")
+	TArray<TObjectPtr<UMaterialInterface>> InspectMaterialOverrides;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
 	TArray<FName> Tags;

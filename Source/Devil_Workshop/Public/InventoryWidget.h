@@ -16,10 +16,13 @@ class UTextureRenderTarget2D;
 class UTexture;
 class UMaterial;
 class USceneCaptureComponent2D;
+class UPointLightComponent;
 class UBackgroundBlur;
 class SWidget;
 class AActor;
 class UStaticMesh;
+class USkeletalMeshComponent;
+class UItemData;
 
 UCLASS(Blueprintable)
 class UInventoryWidget : public UUserWidget
@@ -91,7 +94,7 @@ private:
 	void InitializePreviewSystem();
 	void ShutdownPreviewSystem();
 	UTextureRenderTarget2D* GetOrCreateRenderTarget(int32 SlotIndex);
-	void UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh);
+	void UpdateSlotPreview(int32 SlotIndex, const UItemData* ItemData);
 	void ApplyPreviewMaterialsToImages();
 	void RotatePreviews(float DeltaTime);
 	void BuildInventoryScreen();
@@ -101,7 +104,16 @@ private:
 	TArray<TObjectPtr<AActor>> PreviewActors;
 
 	UPROPERTY()
+	TArray<TObjectPtr<USkeletalMeshComponent>> PreviewSkeletalMeshComponents;
+
+	UPROPERTY()
 	TArray<TObjectPtr<USceneCaptureComponent2D>> PreviewCaptures;
+
+	UPROPERTY()
+	TArray<TObjectPtr<UPointLightComponent>> PreviewKeyLights;
+
+	UPROPERTY()
+	TArray<TObjectPtr<UPointLightComponent>> PreviewFillLights;
 
 	UPROPERTY()
 	TArray<TObjectPtr<UTextureRenderTarget2D>> PreviewRenderTargets;

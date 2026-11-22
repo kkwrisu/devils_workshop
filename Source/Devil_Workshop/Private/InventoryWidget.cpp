@@ -16,8 +16,14 @@
 #include "Textures/SlateShaderResource.h"
 #include "Styling/SlateBrush.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Components/PointLightComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/SkeletalMesh.h"
+#include "Components/MeshComponent.h"
 #include "Engine/Texture2D.h"
 #include "Engine/Texture.h"
 #include "Engine/StaticMeshActor.h"
@@ -251,7 +257,8 @@ int32 UInventoryWidget::NativePaint(const FPaintArgs& Args, const FGeometry& All
 		auto GetItemPreviewTexture = [&](int32 ItemIndex) -> UTexture*
 		{
 			if (!Items.IsValidIndex(ItemIndex) || !Items[ItemIndex].Data) return nullptr;
-			if (Items[ItemIndex].Data->InspectMesh && PreviewRenderTargets.IsValidIndex(ItemIndex) && PreviewRenderTargets[ItemIndex])
+			if ((Items[ItemIndex].Data->InspectMesh || Items[ItemIndex].Data->InspectSkeletalMesh)
+				&& PreviewRenderTargets.IsValidIndex(ItemIndex) && PreviewRenderTargets[ItemIndex])
 			{
 				return PreviewRenderTargets[ItemIndex];
 			}
@@ -314,7 +321,10 @@ void UInventoryWidget::InitializePreviewSystem()
 	if (!bUse3DPreview || !GetWorld()) return;
 
 	PreviewActors.SetNum(MaxPreviewSlots);
+	PreviewSkeletalMeshComponents.SetNum(MaxPreviewSlots);
 	PreviewCaptures.SetNum(MaxPreviewSlots);
+	PreviewKeyLights.SetNum(MaxPreviewSlots);
+	PreviewFillLights.SetNum(MaxPreviewSlots);
 	PreviewRenderTargets.SetNum(MaxPreviewSlots);
 	PreviewCaptureBaseLocations.SetNum(MaxPreviewSlots);
 
@@ -338,7 +348,10 @@ void UInventoryWidget::ShutdownPreviewSystem()
 		}
 	}
 	PreviewActors.Empty();
+	PreviewSkeletalMeshComponents.Empty();
 	PreviewCaptures.Empty();
+	PreviewKeyLights.Empty();
+	PreviewFillLights.Empty();
 	PreviewRenderTargets.Empty();
 }
 
@@ -351,9 +364,10 @@ UTextureRenderTarget2D* UInventoryWidget::GetOrCreateRenderTarget(int32 SlotInde
 	return nullptr;
 }
 
-void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
+void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, const UItemData* ItemData)
 {
-	if (!Mesh || !GetWorld() || SlotIndex < 0 || SlotIndex >= MaxPreviewSlots) return;
+	if (!ItemData || (!ItemData->InspectMesh && !ItemData->InspectSkeletalMesh)
+		|| !GetWorld() || SlotIndex < 0 || SlotIndex >= MaxPreviewSlots) return;
 
 	UTextureRenderTarget2D* RT = GetOrCreateRenderTarget(SlotIndex);
 	if (!RT) return;
@@ -376,6 +390,27 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 			PreviewActor->SetActorHiddenInGame(false);
 			PreviewActor->SetActorEnableCollision(false);
 			PreviewActor->SetActorTickEnabled(false);
+
+			auto CreatePreviewLight = [PreviewActor](const FName& ComponentName, float Intensity, float Radius, float SourceRadius)
+			{
+				UPointLightComponent* Light = NewObject<UPointLightComponent>(PreviewActor, ComponentName);
+				if (!Light) return static_cast<UPointLightComponent*>(nullptr);
+
+				PreviewActor->AddInstanceComponent(Light);
+				Light->SetupAttachment(PreviewActor->GetRootComponent());
+				Light->SetMobility(EComponentMobility::Movable);
+				Light->SetAbsolute(false, false, true);
+				Light->SetIntensity(Intensity);
+				Light->SetAttenuationRadius(Radius);
+				Light->SetSourceRadius(SourceRadius);
+				Light->SetLightColor(FLinearColor::White);
+				Light->SetCastShadows(false);
+				Light->SetLightingChannels(false, true, false);
+				Light->RegisterComponent();
+				return Light;
+			};
+			PreviewKeyLights[SlotIndex] = CreatePreviewLight(FName(*FString::Printf(TEXT("PreviewKeyLight_%d"), SlotIndex)), 2400.0f, 280.0f, 70.0f);
+			PreviewFillLights[SlotIndex] = CreatePreviewLight(FName(*FString::Printf(TEXT("PreviewFillLight_%d"), SlotIndex)), 900.0f, 240.0f, 90.0f);
 
 			USceneCaptureComponent2D* NewCapture = NewObject<USceneCaptureComponent2D>(PreviewActor, *FString::Printf(TEXT("PreviewCapture_%d"), SlotIndex));
 			PreviewCaptures[SlotIndex] = NewCapture;
@@ -414,17 +449,85 @@ void UInventoryWidget::UpdateSlotPreview(int32 SlotIndex, UStaticMesh* Mesh)
 			UStaticMeshComponent* MeshComp = MeshActor->GetStaticMeshComponent();
 			MeshComp->SetMobility(EComponentMobility::Movable);
 			MeshActor->SetActorLocation(FVector(0.0f, 0.0f, -10000.0f));
-			MeshComp->SetStaticMesh(Mesh);
-			Capture->ClearShowOnlyComponents();
-			Capture->ShowOnlyComponent(MeshComp);
 
-			FBoxSphereBounds Bounds = Mesh->GetBounds();
+			if (!PreviewSkeletalMeshComponents[SlotIndex])
+			{
+				USkeletalMeshComponent* NewSkeletalMeshComp = NewObject<USkeletalMeshComponent>(PreviewActor, TEXT("PreviewSkeletalMesh"));
+				NewSkeletalMeshComp->SetupAttachment(PreviewActor->GetRootComponent());
+				NewSkeletalMeshComp->SetMobility(EComponentMobility::Movable);
+				NewSkeletalMeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				NewSkeletalMeshComp->SetComponentTickEnabled(false);
+				PreviewActor->AddInstanceComponent(NewSkeletalMeshComp);
+				NewSkeletalMeshComp->RegisterComponent();
+				PreviewSkeletalMeshComponents[SlotIndex] = NewSkeletalMeshComp;
+			}
+
+			USkeletalMeshComponent* SkeletalMeshComp = PreviewSkeletalMeshComponents[SlotIndex];
+			UPrimitiveComponent* ActiveMeshComponent = nullptr;
+			FBoxSphereBounds Bounds(ForceInit);
+			if (ItemData->InspectSkeletalMesh && SkeletalMeshComp)
+			{
+				MeshComp->SetVisibility(false, false);
+				MeshComp->SetHiddenInGame(true, false);
+				MeshComp->SetStaticMesh(nullptr);
+				SkeletalMeshComp->SetSkeletalMesh(ItemData->InspectSkeletalMesh);
+				SkeletalMeshComp->EmptyOverrideMaterials();
+				for (int32 MaterialIndex = 0; MaterialIndex < ItemData->InspectMaterialOverrides.Num(); ++MaterialIndex)
+				{
+					if (ItemData->InspectMaterialOverrides[MaterialIndex])
+					{
+						SkeletalMeshComp->SetMaterial(MaterialIndex, ItemData->InspectMaterialOverrides[MaterialIndex]);
+					}
+				}
+				SkeletalMeshComp->SetLightingChannels(false, true, false);
+				SkeletalMeshComp->SetVisibility(true, true);
+				SkeletalMeshComp->SetHiddenInGame(false, true);
+				ActiveMeshComponent = SkeletalMeshComp;
+				Bounds = ItemData->InspectSkeletalMesh->GetBounds();
+			}
+			else if (ItemData->InspectMesh)
+			{
+				if (SkeletalMeshComp)
+				{
+					SkeletalMeshComp->SetVisibility(false, true);
+					SkeletalMeshComp->SetHiddenInGame(true, true);
+					SkeletalMeshComp->SetSkeletalMesh(nullptr);
+				}
+				MeshComp->SetStaticMesh(ItemData->InspectMesh);
+				MeshComp->EmptyOverrideMaterials();
+				for (int32 MaterialIndex = 0; MaterialIndex < ItemData->InspectMaterialOverrides.Num(); ++MaterialIndex)
+				{
+					if (ItemData->InspectMaterialOverrides[MaterialIndex])
+					{
+						MeshComp->SetMaterial(MaterialIndex, ItemData->InspectMaterialOverrides[MaterialIndex]);
+					}
+				}
+				MeshComp->SetLightingChannels(false, true, false);
+				MeshComp->SetVisibility(true, false);
+				MeshComp->SetHiddenInGame(false, false);
+				ActiveMeshComponent = MeshComp;
+				Bounds = ItemData->InspectMesh->GetBounds();
+			}
+
+			if (!ActiveMeshComponent) return;
+			Capture->ClearShowOnlyComponents();
+			Capture->ShowOnlyComponent(ActiveMeshComponent);
+
 			float MaxDim = FMath::Max3(Bounds.BoxExtent.X, Bounds.BoxExtent.Y, Bounds.BoxExtent.Z);
 			if (MaxDim > 0.0f)
 			{
 				float TargetSize = 80.0f;
 				float Scale = TargetSize / (MaxDim * 2.0f);
 				MeshActor->SetActorScale3D(FVector(Scale));
+
+				if (PreviewKeyLights.IsValidIndex(SlotIndex) && PreviewKeyLights[SlotIndex])
+				{
+					PreviewKeyLights[SlotIndex]->SetRelativeLocation(FVector(80.0f, -90.0f, 80.0f) / Scale);
+				}
+				if (PreviewFillLights.IsValidIndex(SlotIndex) && PreviewFillLights[SlotIndex])
+				{
+					PreviewFillLights[SlotIndex]->SetRelativeLocation(FVector(40.0f, -80.0f, -65.0f) / Scale);
+				}
 
 				// SceneCapture is attached to this scaled component, so offset its relative position
 				// to aim at the mesh bounds center while keeping a fixed world-space camera distance.
@@ -446,9 +549,9 @@ void UInventoryWidget::UpdateItemPreviews()
 	const TArray<FInventoryItem>& Items = Inventory->GetItems();
 	for (int32 i = 0; i < Items.Num() && i < MaxPreviewSlots; ++i)
 	{
-		if (Items[i].Data && Items[i].Data->InspectMesh)
+		if (Items[i].Data && (Items[i].Data->InspectMesh || Items[i].Data->InspectSkeletalMesh))
 		{
-			UpdateSlotPreview(i, Items[i].Data->InspectMesh);
+			UpdateSlotPreview(i, Items[i].Data);
 		}
 	}
 }
@@ -623,7 +726,8 @@ void UInventoryWidget::ApplyPreviewMaterialsToImages()
 						const int32 ItemIndex = VisibleItemIndices[i];
 						if (Inventory && Inventory->GetItems().IsValidIndex(ItemIndex)
 							&& Inventory->GetItems()[ItemIndex].Data
-							&& Inventory->GetItems()[ItemIndex].Data->InspectMesh
+							&& (Inventory->GetItems()[ItemIndex].Data->InspectMesh
+								|| Inventory->GetItems()[ItemIndex].Data->InspectSkeletalMesh)
 							&& PreviewRenderTargets.IsValidIndex(ItemIndex) && PreviewRenderTargets[ItemIndex])
 						{
 							FSlateBrush PreviewBrush;
@@ -762,7 +866,8 @@ void UInventoryWidget::UpdateSelectedItemPreview(int32 SelectedIndex)
 	SelectedItemName->SetText(Item.Data->DisplayName);
 	SelectedItemDescription->SetText(Item.Data->Description);
 
-	if (Item.Data->InspectMesh && PreviewRenderTargets.IsValidIndex(SelectedIndex) && PreviewRenderTargets[SelectedIndex])
+	if ((Item.Data->InspectMesh || Item.Data->InspectSkeletalMesh)
+		&& PreviewRenderTargets.IsValidIndex(SelectedIndex) && PreviewRenderTargets[SelectedIndex])
 	{
 		SelectedPreviewTexture = PreviewRenderTargets[SelectedIndex];
 		return;

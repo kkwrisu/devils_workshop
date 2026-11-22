@@ -5,7 +5,6 @@
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/TextBlock.h"
-#include "Kismet/GameplayStatics.h"
 #include "Styling/CoreStyle.h"
 
 void UPrologueCompletedWidget::NativeConstruct()
@@ -18,6 +17,8 @@ void UPrologueCompletedWidget::NativeConstruct()
 
 	BlackBackground = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("BlackBackground"));
 	BlackBackground->SetBrushColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+	BlackBackground->SetHorizontalAlignment(HAlign_Center);
+	BlackBackground->SetVerticalAlignment(VAlign_Center);
 	Root->AddChild(BlackBackground);
 	if (UCanvasPanelSlot* BackgroundSlot = Cast<UCanvasPanelSlot>(BlackBackground->Slot))
 	{
@@ -34,25 +35,33 @@ void UPrologueCompletedWidget::NativeConstruct()
 	BlackBackground->SetPadding(FMargin(80.0f));
 }
 
-void UPrologueCompletedWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+void UPrologueCompletedWidget::SetFadeProgress(float BackgroundAlpha, float TextAlpha)
 {
-	Super::NativeTick(MyGeometry, InDeltaTime);
-
-	ElapsedTime += InDeltaTime;
-	const float BackgroundAlpha = FMath::Clamp(ElapsedTime / FadeDuration, 0.0f, 1.0f);
-	const float TextAlpha = FMath::Clamp((ElapsedTime - TextFadeDelay) / TextFadeDuration, 0.0f, 1.0f);
-
 	if (BlackBackground)
 	{
-		BlackBackground->SetBrushColor(FLinearColor(0.0f, 0.0f, 0.0f, BackgroundAlpha));
+		BlackBackground->SetBrushColor(FLinearColor(0.0f, 0.0f, 0.0f, FMath::Clamp(BackgroundAlpha, 0.0f, 1.0f)));
 	}
 	if (CompletionText)
 	{
-		CompletionText->SetColorAndOpacity(FSlateColor(FLinearColor(1.0f, 1.0f, 1.0f, TextAlpha)));
+		CompletionText->SetColorAndOpacity(FSlateColor(FLinearColor(1.0f, 1.0f, 1.0f, FMath::Clamp(TextAlpha, 0.0f, 1.0f))));
 	}
+	InvalidateLayoutAndVolatility();
+}
 
-	if (!bPausedAtEnd && BackgroundAlpha >= 1.0f && TextAlpha >= 1.0f)
+void UPrologueCompletedWidget::FillViewport()
+{
+	if (UCanvasPanelSlot* ViewportCanvasSlot = Cast<UCanvasPanelSlot>(Slot))
 	{
-		bPausedAtEnd = UGameplayStatics::SetGamePaused(this, true);
+		ViewportCanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+		ViewportCanvasSlot->SetOffsets(FMargin(0.0f));
+		ViewportCanvasSlot->SetAlignment(FVector2D::ZeroVector);
+	}
+}
+
+void UPrologueCompletedWidget::SetCompletionText(const FText& Text)
+{
+	if (CompletionText)
+	{
+		CompletionText->SetText(Text);
 	}
 }
