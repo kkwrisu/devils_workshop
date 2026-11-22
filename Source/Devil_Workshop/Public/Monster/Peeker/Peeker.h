@@ -70,6 +70,8 @@ public:
     void PlayHideMontage();
 
 protected:
+    virtual void HandleStateTransition(EMonsterState FromState, EMonsterState ToState) override;
+
     // Peek Socket Configuration
     UPROPERTY(EditAnywhere, Category = "Peeker|Peeking", meta = (Categories = "Peek"))
     TArray<FName> PeekSocketNames;
@@ -82,6 +84,9 @@ protected:
 
     UPROPERTY(EditAnywhere, Category = "Peeker|Peeking")
     float PeekBobSpeed = 2.0f;
+
+    UPROPERTY(EditAnywhere, Category = "Peeker|Peeking")
+    FVector PeekFallbackOffset = FVector(220.0f, 0.0f, 80.0f);
 
     // State
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Peeker|State", Replicated)

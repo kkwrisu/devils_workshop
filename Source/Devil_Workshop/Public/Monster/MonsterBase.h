@@ -28,6 +28,7 @@ public:
 
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaTime) override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void PossessedBy(AController* NewController) override;
     virtual void UnPossessed() override;
 
@@ -146,7 +147,7 @@ protected:
     float PatrolWaitTimeMax = 5.0f;
 
     UPROPERTY(EditAnywhere, Category = "Config")
-    float PeekDuration = 5.0f;
+    float PeekDuration = 12.0f;
 
     UPROPERTY(EditAnywhere, Category = "Config")
     float HidingCooldown = 3.0f;
@@ -177,4 +178,20 @@ protected:
     void OnPatrolTimerElapsed();
 
     virtual void HandleStateTransition(EMonsterState FromState, EMonsterState ToState);
+
+    UFUNCTION()
+    void HandlePlayerNoiseEvent(const FNoiseEvent& NoiseEvent);
+
+    UFUNCTION()
+    void OnQuietPeriodElapsed();
+
+    FTimerHandle NoiseSilenceTimerHandle;
+    int32 NoiseEventsSinceQuiet = 0;
+    bool bInvestigatingNoise = false;
+
+    UPROPERTY(EditAnywhere, Category = "Config|Noise", meta = (ClampMin = "1"))
+    int32 NoiseEventsToPeek = 3;
+
+    UPROPERTY(EditAnywhere, Category = "Config|Noise", meta = (ClampMin = "0.1"))
+    float QuietPeriodToRetreat = 6.0f;
 };

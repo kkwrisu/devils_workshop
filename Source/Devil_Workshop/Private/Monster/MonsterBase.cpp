@@ -21,6 +21,8 @@
 AMonsterBase::AMonsterBase()
 {
     PrimaryActorTick.bCanEverTick = true;
+    AIControllerClass = AMonsterAIController::StaticClass();
+    AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
 
     // AI Perception - created on the AI Controller, not here
     // The perception component will be created in the AI Controller
@@ -61,6 +63,11 @@ void AMonsterBase::BeginPlay()
     InitializePerception();
     BuildNavigationGraph();
 
+    if (APlayerBase* Player = GetPlayerPawn())
+    {
+        Player->OnPlayerMadeNoise.AddUniqueDynamic(this, &AMonsterBase::HandlePlayerNoiseEvent);
+    }
+
     // Start in Patrol state after a short delay
     FTimerHandle InitialTimer;
     GetWorldTimerManager().SetTimer(InitialTimer, [this]()
@@ -70,6 +77,16 @@ void AMonsterBase::BeginPlay()
             SetMonsterState(EMonsterState::Patrol);
         }
     }, 1.0f, false);
+}
+
+void AMonsterBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (APlayerBase* Player = GetPlayerPawn())
+    {
+        Player->OnPlayerMadeNoise.RemoveDynamic(this, &AMonsterBase::HandlePlayerNoiseEvent);
+    }
+    GetWorldTimerManager().ClearTimer(NoiseSilenceTimerHandle);
+    Super::EndPlay(EndPlayReason);
 }
 
 void AMonsterBase::Tick(float DeltaTime)
@@ -133,6 +150,20 @@ void AMonsterBase::BuildNavigationGraph()
         if (Actor && Actor != this)
         {
             NavigationNodes.Add(Actor);
+        }
+    }
+
+    if (!CurrentNode && NavigationNodes.Num() > 0)
+    {
+        float BestDistanceSquared = TNumericLimits<float>::Max();
+        for (AActor* Node : NavigationNodes)
+        {
+            const float DistanceSquared = FVector::DistSquared(GetActorLocation(), Node->GetActorLocation());
+            if (DistanceSquared < BestDistanceSquared)
+            {
+                BestDistanceSquared = DistanceSquared;
+                CurrentNode = Node;
+            }
         }
     }
 
@@ -219,6 +250,9 @@ void AMonsterBase::HandleStateTransition(EMonsterState FromState, EMonsterState 
             break;
 
         case EMonsterState::Hiding:
+            GetWorldTimerManager().ClearTimer(NoiseSilenceTimerHandle);
+            NoiseEventsSinceQuiet = 0;
+            bInvestigatingNoise = false;
             GetWorldTimerManager().SetTimer(StateTimerHandle, this, &AMonsterBase::OnStateTimerElapsed, HidingCooldown, false);
             break;
 
@@ -240,6 +274,7 @@ void AMonsterBase::OnStateTimerElapsed()
     switch (CurrentState)
     {
         case EMonsterState::Investigate:
+            if (bInvestigatingNoise) return;
             // Lost target during investigation, return to patrol
             if (!PerceivedTarget)
             {
@@ -403,17 +438,65 @@ void AMonsterBase::OnPlayerClosedDoor_Implementation(AActor* DoorActor)
 
 void AMonsterBase::OnPlayerMadeNoise_Implementation(const FNoiseEvent& NoiseEvent)
 {
-    UE_LOG(LogTemp, Log, TEXT("MonsterBase: Heard noise %s at %s"), *NoiseEvent.NoiseTag.ToString(), *NoiseEvent.Location.ToString());
+    const FName NoiseTagName = NoiseEvent.NoiseTag.GetTagName();
+    const bool bRelevantNoise = NoiseTagName == FName(TEXT("Noise.Event.ScrewTurn"))
+        || NoiseTagName == FName(TEXT("Noise.Event.Footstep.Walk"))
+        || NoiseTagName == FName(TEXT("Noise.Event.Footstep.Run"));
+    if (!bRelevantNoise) return;
 
-    if (CurrentState == EMonsterState::Patrol || CurrentState == EMonsterState::Hiding)
+    const float EffectiveRange = NoiseEvent.HearRange * FMath::Max(0.1f, NoiseEvent.Loudness);
+    if (FVector::DistSquared(GetActorLocation(), NoiseEvent.Location) > FMath::Square(EffectiveRange)) return;
+
+    UE_LOG(LogTemp, Log, TEXT("MonsterBase: Heard noise %s at %s"), *NoiseTagName.ToString(), *NoiseEvent.Location.ToString());
+
+    bInvestigatingNoise = true;
+    ++NoiseEventsSinceQuiet;
+    PerceivedTarget = NoiseEvent.Instigator;
+    GetWorldTimerManager().ClearTimer(NoiseSilenceTimerHandle);
+    GetWorldTimerManager().SetTimer(NoiseSilenceTimerHandle, this, &AMonsterBase::OnQuietPeriodElapsed, QuietPeriodToRetreat, false);
+
+    if (CurrentState != EMonsterState::Peeking)
     {
-        // Investigate noise location
+        GetWorldTimerManager().ClearTimer(StateTimerHandle);
         SetMonsterState(EMonsterState::Investigate);
+        GetWorldTimerManager().ClearTimer(StateTimerHandle);
+    }
 
+    if (CurrentState != EMonsterState::Peeking)
+    {
         if (AMonsterAIController* AIController = Cast<AMonsterAIController>(GetController()))
         {
-            AIController->GetBlackboardComponent()->SetValueAsVector("NoiseLocation", NoiseEvent.Location);
+            if (UBlackboardComponent* BB = AIController->GetBlackboardComponent())
+            {
+                BB->SetValueAsVector("NoiseLocation", NoiseEvent.Location);
+            }
             AIController->MoveToLocation(NoiseEvent.Location, 50.0f);
+        }
+    }
+
+    if (NoiseEventsSinceQuiet >= NoiseEventsToPeek && CurrentState != EMonsterState::Peeking)
+    {
+        SetMonsterState(EMonsterState::Peeking);
+    }
+}
+
+void AMonsterBase::HandlePlayerNoiseEvent(const FNoiseEvent& NoiseEvent)
+{
+    OnPlayerMadeNoise(NoiseEvent);
+}
+
+void AMonsterBase::OnQuietPeriodElapsed()
+{
+    bInvestigatingNoise = false;
+    NoiseEventsSinceQuiet = 0;
+    PerceivedTarget = nullptr;
+
+    if (CurrentState == EMonsterState::Investigate || CurrentState == EMonsterState::Peeking)
+    {
+        SetMonsterState(EMonsterState::Hiding);
+        if (PreviousNode)
+        {
+            MoveToNode(PreviousNode);
         }
     }
 }

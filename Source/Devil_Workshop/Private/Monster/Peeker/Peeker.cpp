@@ -83,37 +83,30 @@ void APeeker::StartPeeking(AActor* PlayerNode)
 {
     if (!PlayerNode || bIsPeeking) return;
 
+    if (AAIController* AIController = Cast<AAIController>(GetController()))
+    {
+        AIController->StopMovement();
+    }
+
     PeekTargetNode = PlayerNode;
     bIsPeeking = true;
 
     FindAvailablePeekSocket(PlayerNode);
 
-    if (CurrentPeekSocket == NAME_None)
+    UE_LOG(LogTemp, Log, TEXT("Peeker: Starting peek at %s on node %s"),
+        CurrentPeekSocket.IsNone() ? TEXT("fallback position") : *CurrentPeekSocket.ToString(), *PlayerNode->GetName());
+
+    UStaticMeshComponent* MeshComp = PlayerNode->FindComponentByClass<UStaticMeshComponent>();
+    if (!CurrentPeekSocket.IsNone() && MeshComp && MeshComp->DoesSocketExist(CurrentPeekSocket))
     {
-        UE_LOG(LogTemp, Warning, TEXT("Peeker: No valid peek socket found on node %s"), *PlayerNode->GetName());
-        StopPeeking();
-        return;
+        PeekStartLocation = MeshComp->GetSocketLocation(CurrentPeekSocket);
+        PeekStartRotation = MeshComp->GetSocketQuaternion(CurrentPeekSocket);
     }
-
-    UE_LOG(LogTemp, Log, TEXT("Peeker: Starting peek at socket %s on node %s"), *CurrentPeekSocket.ToString(), *PlayerNode->GetName());
-
-    // Teleport to peek position
-    USceneComponent* SocketComponent = PlayerNode->FindComponentByClass<USceneComponent>();
-    if (SocketComponent)
+    else
     {
-        // Find the specific socket on the mesh
-        UStaticMeshComponent* MeshComp = Cast<UStaticMeshComponent>(SocketComponent);
-        if (MeshComp && MeshComp->DoesSocketExist(CurrentPeekSocket))
-        {
-            PeekStartLocation = MeshComp->GetSocketLocation(CurrentPeekSocket);
-            PeekStartRotation = MeshComp->GetSocketQuaternion(CurrentPeekSocket);
-        }
-        else
-        {
-            // Fallback: use actor location + offset
-            PeekStartLocation = PlayerNode->GetActorLocation() + FVector(0, 0, 100);
-            PeekStartRotation = PlayerNode->GetActorQuat();
-        }
+        const FTransform NodeTransform = PlayerNode->GetActorTransform();
+        PeekStartLocation = NodeTransform.TransformPosition(PeekFallbackOffset);
+        PeekStartRotation = NodeTransform.GetRotation();
     }
 
     // Show mesh at peek position
@@ -259,6 +252,32 @@ void APeeker::FindAvailablePeekSocket(AActor* PlayerNode)
             }
         }
     }
+
+    // Area markers do not need sockets: use the editable local offset as a fallback.
+}
+
+void APeeker::HandleStateTransition(EMonsterState FromState, EMonsterState ToState)
+{
+    Super::HandleStateTransition(FromState, ToState);
+
+    if (ToState == EMonsterState::Peeking)
+    {
+        if (APlayerBase* Player = GetPlayerPawn())
+        {
+            if (Player->CurrentAreaActor)
+            {
+                StartPeeking(Player->CurrentAreaActor);
+            }
+            else
+            {
+                SetMonsterState(EMonsterState::Investigate);
+            }
+        }
+    }
+    else if (ToState == EMonsterState::Hiding && bIsPeeking)
+    {
+        StopPeeking();
+    }
 }
 
 TArray<FName> APeeker::GetPeekSocketsForNode(AActor* Node) const
@@ -320,44 +339,27 @@ void APeeker::UpdatePeekBob(float DeltaTime)
 bool APeeker::IsPlayerLookingAtPeek() const
 {
     APlayerBase* Player = GetPlayerPawn();
-    if (!Player || !Player->Camera || !PeekTargetNode) return false;
+    if (!Player || !Player->Camera) return false;
 
-    // Check if player is in CameraFocus mode looking at a "SecurityCamera"
-    // OR if edge-look is pointing at our peek socket
-    if (Player->bIsCameraFocused)
+    const FVector LookTarget = GetActorLocation() + FVector(0.0f, 0.0f, 50.0f);
+
+    const FVector CameraLocation = Player->Camera->GetComponentLocation();
+    const FVector ToPeeker = (LookTarget - CameraLocation).GetSafeNormal();
+    if (FVector::DotProduct(Player->Camera->GetForwardVector(), ToPeeker) < 0.92f)
     {
-        AActor* FocusActor = Player->InspectedObject; // Reused for camera focus target
-        if (FocusActor && FocusActor->ActorHasTag("SecurityCamera"))
-        {
-            return true;
-        }
+        return false;
     }
 
-    // Check edge-look direction towards peek socket
-    if (Player->Camera)
+    FCollisionQueryParams Params(SCENE_QUERY_STAT(PeekerGaze), true);
+    Params.AddIgnoredActor(Player);
+
+    FHitResult Hit;
+    if (GetWorld()->LineTraceSingleByChannel(Hit, CameraLocation, LookTarget, ECC_Visibility, Params))
     {
-        FVector CameraLocation = Player->Camera->GetComponentLocation();
-        FVector CameraForward = Player->Camera->GetForwardVector();
-
-        USceneComponent* SocketComponent = PeekTargetNode->FindComponentByClass<USceneComponent>();
-        if (SocketComponent)
-        {
-            UStaticMeshComponent* MeshComp = Cast<UStaticMeshComponent>(SocketComponent);
-            if (MeshComp && MeshComp->DoesSocketExist(CurrentPeekSocket))
-            {
-                FVector SocketLocation = MeshComp->GetSocketLocation(CurrentPeekSocket);
-                FVector ToSocket = (SocketLocation - CameraLocation).GetSafeNormal();
-
-                float Dot = FVector::DotProduct(CameraForward, ToSocket);
-                if (Dot > 0.95f) // ~18 degrees
-                {
-                    return true;
-                }
-            }
-        }
+        return Hit.GetActor() == this;
     }
 
-    return false;
+    return true;
 }
 
 void APeeker::PlayPeekMontage()
@@ -469,20 +471,7 @@ void APeeker::OnPlayerClosedDoor_Implementation(AActor* DoorActor)
 
 void APeeker::OnPlayerMadeNoise_Implementation(const FNoiseEvent& NoiseEvent)
 {
-    UE_LOG(LogTemp, Log, TEXT("Peeker: Heard noise %s"), *NoiseEvent.NoiseTag.ToString());
-
-    if (CurrentState == EMonsterState::Patrol || CurrentState == EMonsterState::Hiding)
-    {
-        // Distracted by noise - investigate
-        StopPeeking();
-        SetMonsterState(EMonsterState::Investigate);
-
-        if (AMonsterAIController* AIController = Cast<AMonsterAIController>(GetController()))
-        {
-            AIController->SetBlackboardVector(FName("NoiseLocation"), NoiseEvent.Location);
-            AIController->MoveToLocation(NoiseEvent.Location, 50.0f);
-        }
-    }
+	Super::OnPlayerMadeNoise_Implementation(NoiseEvent);
 }
 
 void APeeker::OnPlayerStaredAtPeeker_Implementation()

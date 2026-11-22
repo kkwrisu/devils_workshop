@@ -56,6 +56,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void ApplyLookPitchDelta(double Delta);
 
+	UFUNCTION(BlueprintCallable, Category = "Monsters|Noise")
+	void ReportGameplayNoise(FName NoiseTagName, float Loudness = 1.0f, float HearRange = 2000.0f);
+
 	bool IsClickHeld() const { return bClickHeld; }
 	void SetWorkingOnPart(bool bWorking) { bWorkingOnPart = bWorking; }
 
@@ -197,6 +200,7 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Bob")
 	double BobAmplitude = 40.0;
 
+public:
 	// Monster Reaction Delegates
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerUsedSecurityCamera, AActor*, CameraActor);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerClosedDoor, AActor*, DoorActor);
@@ -211,6 +215,7 @@ protected:
 	UPROPERTY(BlueprintAssignable, Category = "Monsters")
 	FOnPlayerMadeNoise OnPlayerMadeNoise;
 
+protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Timelines")
 	TObjectPtr<UCurveFloat> MoveCurve;
 

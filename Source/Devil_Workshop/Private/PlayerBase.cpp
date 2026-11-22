@@ -438,10 +438,25 @@ void APlayerBase::OnClick()
 
 	if (FallbackClickable && FallbackClickable != CurrentAreaActor)
 	{
+		ReportGameplayNoise(FName(TEXT("Noise.Event.Footstep.Walk")), 0.7f, 2000.0f);
 		CurrentAreaActor = FallbackClickable;
 		PositionHistory.Add(GetActorTransform());
 		MoveToPosition(FallbackClickable->GetActorTransform());
 	}
+}
+
+void APlayerBase::ReportGameplayNoise(FName NoiseTagName, float Loudness, float HearRange)
+{
+	if (NoiseTagName.IsNone() || !GetWorld()) return;
+
+	FNoiseEvent NoiseEvent;
+	NoiseEvent.NoiseTag = FGameplayTag::RequestGameplayTag(NoiseTagName, false);
+	NoiseEvent.Location = GetActorLocation();
+	NoiseEvent.Loudness = FMath::Max(0.0f, Loudness);
+	NoiseEvent.HearRange = FMath::Max(0.0f, HearRange);
+	NoiseEvent.Instigator = this;
+	NoiseEvent.Timestamp = GetWorld()->GetTimeSeconds();
+	OnPlayerMadeNoise.Broadcast(NoiseEvent);
 }
 
 void APlayerBase::TryUseItemOnPart()

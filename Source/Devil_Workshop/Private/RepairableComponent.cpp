@@ -462,6 +462,16 @@ bool URepairableComponent::BeginStep(FName StepId)
             Step.CurrentProgress = Step.bPersistProgress ? Step.CurrentProgress : 0.0f;
             bIsRepairing = true;
 
+            const FString StepIdText = Step.StepId.ToString();
+            const FString DisplayNameText = Step.DisplayName.ToString();
+			if (CurrentUser.IsValid()
+				&& (StepIdText.Contains(TEXT("Screw"), ESearchCase::IgnoreCase)
+					|| StepIdText.Contains(TEXT("Parafuso"), ESearchCase::IgnoreCase)
+					|| DisplayNameText.Contains(TEXT("parafuso"), ESearchCase::IgnoreCase)))
+			{
+				CurrentUser->ReportGameplayNoise(FName(TEXT("Noise.Event.ScrewTurn")), 0.8f, 1800.0f);
+			}
+
             if (Step.bRestoreHiddenMorphOnStart && !Step.MorphTargetName.IsNone())
             {
                 if (USkeletalMeshComponent* SkelMesh = GetSkeletalMesh())
