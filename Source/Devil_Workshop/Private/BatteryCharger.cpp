@@ -8,7 +8,9 @@
 #include "InventoryComponent.h"
 #include "ItemData.h"
 #include "PlayerBase.h"
+#include "Monster/MonsterBase.h"
 #include "Perception/AISense_Hearing.h"
+#include "Engine/TargetPoint.h"
 
 ABatteryCharger::ABatteryCharger()
 {
@@ -57,6 +59,8 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 	ChargeElapsed = 0.0f;
 	NextChargingNoiseTime = FMath::Max(ChargingNoiseInterval, 0.1f);
 	ChargeInstigator = User;
+	EncounterPlayer = Cast<APlayerBase>(User);
+	bMonsterSpawnedForCurrentBattery = false;
 	State = EChargerState::Charging;
 
 	if (UStaticMesh* Visual = Item.Data->InspectMesh)
@@ -79,12 +83,93 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 
 	SetActorTickEnabled(true);
 	OnChargeStarted.Broadcast();
+	if (APlayerBase* Player = EncounterPlayer.Get(); Player && Player->IsInCorridor())
+	{
+		GetWorldTimerManager().SetTimer(
+			MonsterSpawnTimerHandle, this, &ABatteryCharger::SpawnCorridorMonster,
+			FMath::Max(MonsterSpawnDelay, 0.1f), false);
+		UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': monstro agendado para surgir em %.1f s"), *GetName(), MonsterSpawnDelay);
+	}
 	ReportHearingNoise(FName("BatteryCharging"), ChargingNoiseLoudness, ChargingNoiseRange);
 
 	UE_LOG(LogTemp, Warning, TEXT("Carregador '%s': carregando '%s' por %.1f s"), *GetName(), *Item.Data->GetName(), ChargeDuration);
 
 	// true = o jogador perde a bateria do inventario (ela fica dentro do carregador)
 	return true;
+}
+
+void ABatteryCharger::HandlePlayerCorridorChanged(APlayerBase* Player, bool bEnteredCorridor)
+{
+	if (!Player || Player != EncounterPlayer.Get()) return;
+
+	if (!bEnteredCorridor)
+	{
+		GetWorldTimerManager().ClearTimer(MonsterSpawnTimerHandle);
+		if (AMonsterBase* Monster = CorridorMonster.Get())
+		{
+			Monster->Destroy();
+			UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': jogador saiu do corredor; perseguição encerrada"), *GetName());
+		}
+		CorridorMonster.Reset();
+		return;
+	}
+
+	// Se ainda estiver carregando e o jogador retornar antes do surgimento,
+	// inicia uma nova janela de 15 segundos dentro do corredor.
+	if (State == EChargerState::Charging && !bMonsterSpawnedForCurrentBattery && !GetWorldTimerManager().IsTimerActive(MonsterSpawnTimerHandle))
+	{
+		GetWorldTimerManager().SetTimer(
+			MonsterSpawnTimerHandle, this, &ABatteryCharger::SpawnCorridorMonster,
+			FMath::Max(MonsterSpawnDelay, 0.1f), false);
+	}
+}
+
+void ABatteryCharger::SpawnCorridorMonster()
+{
+	APlayerBase* Player = EncounterPlayer.Get();
+	if (State != EChargerState::Charging || !IsValid(Player) || !Player->IsInCorridor())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': surgimento cancelado; carregamento/player/corredor inválido"), *GetName());
+		return;
+	}
+	if (!CorridorMonsterClass)
+	{
+		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': CorridorMonsterClass não foi configurado"), *GetName());
+		return;
+	}
+
+	TArray<AActor*> SpawnPoints;
+	UGameplayStatics::GetAllActorsWithTag(this, MonsterSpawnPointTag, SpawnPoints);
+	if (SpawnPoints.IsEmpty())
+	{
+		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': nenhum ponto com tag '%s' na fase"), *GetName(), *MonsterSpawnPointTag.ToString());
+		return;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+	AMonsterBase* SpawnedMonster = GetWorld()->SpawnActor<AMonsterBase>(
+		CorridorMonsterClass, SpawnPoints[0]->GetActorTransform(), SpawnParams);
+	if (!SpawnedMonster)
+	{
+		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': falha ao criar monstro"), *GetName());
+		return;
+	}
+
+	CorridorMonster = SpawnedMonster;
+	bMonsterSpawnedForCurrentBattery = true;
+	SpawnedMonster->StartCorridorChase(Player);
+	UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': monstro '%s' surgiu no corredor"), *GetName(), *SpawnedMonster->GetName());
+}
+
+void ABatteryCharger::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GetWorldTimerManager().ClearTimer(MonsterSpawnTimerHandle);
+	if (AMonsterBase* Monster = CorridorMonster.Get())
+	{
+		Monster->Destroy();
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 void ABatteryCharger::Tick(float DeltaTime)

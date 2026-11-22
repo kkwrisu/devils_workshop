@@ -18,6 +18,11 @@
 #include "NavigationSystem.h"
 #include "Monsters/MonsterTypes.h"
 
+namespace
+{
+	const FName MonsterPatrolNodeTag(TEXT("MonsterPatrolPoint"));
+}
+
 AMonsterBase::AMonsterBase()
 {
     PrimaryActorTick.bCanEverTick = true;
@@ -74,7 +79,10 @@ void AMonsterBase::BeginPlay()
     {
         if (HasAuthority())
         {
-            SetMonsterState(EMonsterState::Patrol);
+            if (!bCorridorChaseMode)
+            {
+                SetMonsterState(EMonsterState::Patrol);
+            }
         }
     }, 1.0f, false);
 }
@@ -92,6 +100,11 @@ void AMonsterBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AMonsterBase::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
+
+	if (bCorridorChaseMode)
+	{
+		return;
+	}
 
     // Update blackboard with current state info
     if (AMonsterAIController* AIController = Cast<AMonsterAIController>(GetController()))
@@ -142,10 +155,10 @@ void AMonsterBase::BuildNavigationGraph()
 {
     NavigationNodes.Empty();
 
-    TArray<AActor*> ClickableActors;
-    UGameplayStatics::GetAllActorsWithTag(GetWorld(), FName("Clickable"), ClickableActors);
+    TArray<AActor*> PatrolPointActors;
+    UGameplayStatics::GetAllActorsWithTag(GetWorld(), MonsterPatrolNodeTag, PatrolPointActors);
 
-    for (AActor* Actor : ClickableActors)
+    for (AActor* Actor : PatrolPointActors)
     {
         if (Actor && Actor != this)
         {
@@ -167,7 +180,31 @@ void AMonsterBase::BuildNavigationGraph()
         }
     }
 
-    UE_LOG(LogTemp, Log, TEXT("MonsterBase: Built navigation graph with %d nodes"), NavigationNodes.Num());
+    UE_LOG(LogTemp, Log, TEXT("MonsterBase: Built patrol graph from tag '%s' with %d points"),
+        *MonsterPatrolNodeTag.ToString(), NavigationNodes.Num());
+}
+
+void AMonsterBase::StartCorridorChase(AActor* TargetActor)
+{
+	if (!IsValid(TargetActor)) return;
+
+	bCorridorChaseMode = true;
+	PerceivedTarget = TargetActor;
+	GetWorldTimerManager().ClearAllTimersForObject(this);
+	GetCharacterMovement()->MaxWalkSpeed = 350.0f;
+	SetMonsterState(EMonsterState::Chase);
+
+	if (AMonsterAIController* MonsterController = Cast<AMonsterAIController>(GetController()))
+	{
+		MonsterController->StopBehaviorTree();
+		MonsterController->StopMovement();
+		MonsterController->MoveToActor(TargetActor, 70.0f, true, true, false, nullptr, true);
+		UE_LOG(LogTemp, Warning, TEXT("MonsterBase '%s': perseguindo '%s' pelo NavMesh"), *GetName(), *TargetActor->GetName());
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("MonsterBase '%s': sem MonsterAIController para iniciar perseguição"), *GetName());
+	}
 }
 
 TArray<AActor*> AMonsterBase::GetAdjacentNodes() const
@@ -198,7 +235,9 @@ bool AMonsterBase::IsNodeAdjacentToPlayer(AActor* Node) const
     APlayerBase* Player = GetPlayerPawn();
     if (!Player || !Player->CurrentAreaActor || !Node) return false;
 
-    return Node == Player->CurrentAreaActor;
+    const float DistanceSquared = FVector::DistSquared(
+        Node->GetActorLocation(), Player->CurrentAreaActor->GetActorLocation());
+    return DistanceSquared <= FMath::Square(NodeAdjacencyDistance);
 }
 
 APlayerBase* AMonsterBase::GetPlayerPawn() const
@@ -358,6 +397,7 @@ void AMonsterBase::SetPreviousNode(AActor* NodeActor)
 
 void AMonsterBase::OnTargetPerceived(AActor* Actor, FAIStimulus Stimulus)
 {
+	if (bCorridorChaseMode) return;
     if (!Actor) return;
 
     APlayerBase* Player = Cast<APlayerBase>(Actor);
@@ -438,6 +478,7 @@ void AMonsterBase::OnPlayerClosedDoor_Implementation(AActor* DoorActor)
 
 void AMonsterBase::OnPlayerMadeNoise_Implementation(const FNoiseEvent& NoiseEvent)
 {
+	if (bCorridorChaseMode) return;
     const FName NoiseTagName = NoiseEvent.NoiseTag.GetTagName();
     const bool bRelevantNoise = NoiseTagName == FName(TEXT("Noise.Event.ScrewTurn"))
         || NoiseTagName == FName(TEXT("Noise.Event.Footstep.Walk"))

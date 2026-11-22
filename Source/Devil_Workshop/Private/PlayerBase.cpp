@@ -737,6 +737,18 @@ void APlayerBase::UpdateCorridorReticle()
 
 void APlayerBase::SetCorridorMode(bool bEnable)
 {
+	if (bIsInCorridor != bEnable)
+	{
+		TArray<AActor*> Chargers;
+		UGameplayStatics::GetAllActorsOfClass(this, ABatteryCharger::StaticClass(), Chargers);
+		for (AActor* Actor : Chargers)
+		{
+			if (ABatteryCharger* Charger = Cast<ABatteryCharger>(Actor))
+			{
+				Charger->HandlePlayerCorridorChanged(this, bEnable);
+			}
+		}
+	}
 	SetCorridorCrouched(false);
 	bIsInCorridor = bEnable;
 	CorridorFootstepNoiseTimer = 0.0f;

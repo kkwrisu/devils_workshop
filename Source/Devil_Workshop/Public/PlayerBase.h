@@ -64,6 +64,7 @@ public:
 	void ReportGameplayNoise(FName NoiseTagName, float Loudness = 1.0f, float HearRange = 2000.0f);
 
 	bool IsClickHeld() const { return bClickHeld; }
+    bool IsInCorridor() const { return bIsInCorridor; }
 	void SetWorkingOnPart(bool bWorking) { bWorkingOnPart = bWorking; }
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")

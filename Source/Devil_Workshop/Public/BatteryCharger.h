@@ -10,6 +10,7 @@ class UAudioComponent;
 class USoundBase;
 class UItemData;
 class APlayerBase;
+class AMonsterBase;
 
 UENUM(BlueprintType)
 enum class EChargerState : uint8
@@ -37,6 +38,10 @@ public:
 
 	virtual bool CanUseItem_Implementation(const FInventoryItem& Item) override;
 	virtual bool UseItem_Implementation(const FInventoryItem& Item, AActor* User) override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	// Chamado pelo PlayerBase ao concluir entrada/saída do corredor.
+	void HandlePlayerCorridorChanged(APlayerBase* Player, bool bEnteredCorridor);
 
 	// Devolve a bateria carregada ao jogador. Retorna true se entregou.
 	UFUNCTION(BlueprintCallable, Category = "Carregador")
@@ -102,14 +107,28 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Carregador|Audio|Ruido", meta = (ClampMin = "0.0"))
 	float ChargeCompleteNoiseRange = 2400.0f;
 
+	UPROPERTY(EditAnywhere, Category = "Carregador|Encontro")
+	TSubclassOf<AMonsterBase> CorridorMonsterClass;
+
+	UPROPERTY(EditAnywhere, Category = "Carregador|Encontro", meta = (ClampMin = "0.1"))
+	float MonsterSpawnDelay = 15.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Carregador|Encontro")
+	FName MonsterSpawnPointTag = FName(TEXT("CorridorMonsterSpawnPoint"));
+
 private:
 	void FinishCharging();
+	void SpawnCorridorMonster();
 	void ReportHearingNoise(FName EventTag, float Loudness, float MaxRange);
 
 	EChargerState State = EChargerState::Empty;
 	float ChargeElapsed = 0.0f;
 	float NextChargingNoiseTime = 0.0f;
 	TWeakObjectPtr<AActor> ChargeInstigator;
+	TWeakObjectPtr<APlayerBase> EncounterPlayer;
+	TWeakObjectPtr<AMonsterBase> CorridorMonster;
+	FTimerHandle MonsterSpawnTimerHandle;
+	bool bMonsterSpawnedForCurrentBattery = false;
 
 	UPROPERTY()
 	TObjectPtr<UItemData> StoredItemData;

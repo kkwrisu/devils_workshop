@@ -85,6 +85,10 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Monster|Patrol")
     void MoveToNode(AActor* TargetNode);
 
+    // Temporarily bypasses patrol/behavior-tree logic and pursues the player through navmesh.
+    UFUNCTION(BlueprintCallable, Category = "Monster|Navigation")
+    void StartCorridorChase(AActor* TargetActor);
+
 protected:
     // Components
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
@@ -188,6 +192,7 @@ protected:
     FTimerHandle NoiseSilenceTimerHandle;
     int32 NoiseEventsSinceQuiet = 0;
     bool bInvestigatingNoise = false;
+    bool bCorridorChaseMode = false;
 
     UPROPERTY(EditAnywhere, Category = "Config|Noise", meta = (ClampMin = "1"))
     int32 NoiseEventsToPeek = 3;
