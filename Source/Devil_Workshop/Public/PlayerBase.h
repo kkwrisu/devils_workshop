@@ -27,7 +27,24 @@ class URepairableComponent;
 class UTaskListWidget;
 class UPrologueCompletedWidget;
 class UCorridorReticleWidget;
+class AMonsterBase;
+class USoundBase;
+class USoundAttenuation;
+class UAudioComponent;
 struct FInputActionValue;
+
+struct FCorridorCabinetFallState
+{
+	TWeakObjectPtr<AActor> Actor;
+	FVector Pivot = FVector::ZeroVector;
+	float FloorZ = 0.0f;
+	FVector StartLocation = FVector::ZeroVector;
+	FRotator StartRotation = FRotator::ZeroRotator;
+	FRotator TargetRotation = FRotator::ZeroRotator;
+	float Elapsed = 0.0f;
+	bool bMonsterEnteredTriggerRange = false;
+	bool bTriggered = false;
+};
 
 UCLASS(Blueprintable)
 class APlayerBase : public APawn
@@ -50,6 +67,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void StartCameraFocus(AActor* FocusActor);
+	void StartMonsterReveal(AMonsterBase* Monster);
+	void ClosePursuitDoor(AActor* DoorActor, USoundBase* DoorSound);
+	void CheckMonsterProximityToCabinets(const FVector& MonsterLocation);
 
 	UFUNCTION(BlueprintCallable, Category = "Player")
 	void ExitCameraFocus();
@@ -62,6 +82,8 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Monsters|Noise")
 	void ReportGameplayNoise(FName NoiseTagName, float Loudness = 1.0f, float HearRange = 2000.0f);
+
+	void PlayPickupSound(USoundBase* SoundOverride, const FVector& Location);
 
 	bool IsClickHeld() const { return bClickHeld; }
     bool IsInCorridor() const { return bIsInCorridor; }
@@ -114,6 +136,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;
@@ -250,6 +273,51 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Corridor|Controls", meta = (ClampMin = "0.05"))
 	float CorridorFootstepNoiseInterval = 0.5f;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Workshop")
+	TObjectPtr<USoundBase> WorkshopMovementSound;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Pickups")
+	TObjectPtr<USoundBase> DefaultPickupSound;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Pickups", meta = (ClampMin = "0.0", ClampMax = "0.15"))
+	float PickupSoundPitchVariation = 0.04f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Corridor")
+	TObjectPtr<USoundBase> CorridorMovementSound;
+
+	UPROPERTY(EditAnywhere, Category = "Audio|Corridor", meta = (ClampMin = "1.0", ClampMax = "2.0"))
+	float CorridorRunSoundPitch = 1.12f;
+
+	UPROPERTY(EditAnywhere, Category = "Audio|Corridor", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float CorridorCrouchSoundVolume = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category = "Audio|Corridor", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float CorridorCrouchSoundPitch = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category = "Audio|Corridor", meta = (ClampMin = "200.0", ClampMax = "20000.0"))
+	float CorridorCrouchLowPassFrequency = 1600.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Encontro", meta = (ClampMin = "1.0"))
+	float MonsterRevealDuration = 1.25f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Perigos", meta = (ClampMin = "1.0"))
+	float CabinetFallTriggerDistance = 220.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Perigos", meta = (ClampMin = "0.0"))
+	float CabinetFallClearanceDistance = 120.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Perigos", meta = (ClampMin = "1.0"))
+	float CabinetFallDuration = 0.65f;
+
+	UPROPERTY(EditAnywhere, Category = "Corridor|Perigos", meta = (ClampMin = "1.0", ClampMax = "89.0"))
+	float CabinetFallAngle = 82.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Corridor|Perigos|Audio")
+	TObjectPtr<USoundBase> CabinetFallSound;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Corridor|Perigos|Audio")
+	TObjectPtr<USoundAttenuation> CabinetFallAttenuation;
+
 public:
 	// Monster Reaction Delegates
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerUsedSecurityCamera, AActor*, CameraActor);
@@ -348,6 +416,10 @@ protected:
 	bool bIgnoreNextCorridorMouseDelta = false;
 	bool bIsCorridorCrouched = false;
 	float CorridorFootstepNoiseTimer = 0.0f;
+	UPROPERTY()
+	TObjectPtr<UAudioComponent> WorkshopMovementAudio;
+	UPROPERTY()
+	TObjectPtr<UAudioComponent> CorridorMovementAudio;
 	FVector CorridorCollisionRelativeLocation = FVector(0.0f, 0.0f, -69.0f);
 	FVector CorridorStandCameraRelativeLocation = FVector::ZeroVector;
 	FVector CorridorStandCollisionRelativeLocation = FVector(0.0f, 0.0f, -69.0f);
@@ -356,6 +428,17 @@ protected:
 	float CorridorTargetPitchOffset = 0.0f;
 	float CorridorStandCapsuleHalfHeight = 65.0f;
 	float CorridorStandCapsuleRadius = 26.0f;
+	TArray<FCorridorCabinetFallState> CorridorCabinets;
+	TWeakObjectPtr<AMonsterBase> PendingCorridorRevealMonster;
+	TWeakObjectPtr<AActor> PursuitDoorToClose;
+	FVector PursuitDoorPivot = FVector::ZeroVector;
+	FVector PursuitDoorStartLocation = FVector::ZeroVector;
+	FVector PursuitDoorTargetLocation = FVector::ZeroVector;
+	FRotator PursuitDoorStartRotation = FRotator::ZeroRotator;
+	FRotator PursuitDoorTargetRotation = FRotator::ZeroRotator;
+	float PursuitDoorCloseElapsed = 0.0f;
+	float PursuitDoorCloseDuration = 0.7f;
+	bool bPursuitDoorClosing = false;
 
 	FVector FocusStartLocation = FVector::ZeroVector;
 	FVector FocusTargetLocation = FVector::ZeroVector;
@@ -430,6 +513,11 @@ protected:
 	void OnLook(const FInputActionValue& Value);
 	void OnPause();
 	void UpdateCorridorControls(float DeltaTime);
+	void UpdateWorkshopMovementAudio(bool bMoving);
+	void UpdateCorridorMovementAudio(bool bMoving, bool bSprinting, bool bCrouching);
+	void PauseMovementAudio();
+	void UpdateCorridorHazards(float DeltaTime);
+	void UpdatePursuitDoor(float DeltaTime);
 	void SetCorridorCrouched(bool bCrouched);
 	void UpdateCorridorReticle();
 	bool IsCorridorInteractable(AActor* Actor) const;

@@ -17,6 +17,9 @@ class UBlackboardComponent;
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
 class APlayerBase;
+class USoundBase;
+class USoundAttenuation;
+class UAudioComponent;
 
 UCLASS(Abstract, Blueprintable)
 class DEVIL_WORKSHOP_API AMonsterBase : public ACharacter
@@ -88,6 +91,27 @@ public:
     // Temporarily bypasses patrol/behavior-tree logic and pursues the player through navmesh.
     UFUNCTION(BlueprintCallable, Category = "Monster|Navigation")
     void StartCorridorChase(AActor* TargetActor);
+
+    // Holds the spawned monster still while the player is shown its arrival.
+    void PrepareCorridorReveal();
+    bool IsCorridorChasing() const { return bCorridorChaseMode && bCorridorChaseActive; }
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Monster|Audio")
+    TObjectPtr<USoundBase> CorridorChaseSound;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Monster|Audio")
+    TObjectPtr<USoundBase> CorridorChaseMusic;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Monster|Audio|Footsteps")
+    TObjectPtr<USoundBase> MonsterFootstepSound;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Monster|Audio|Footsteps")
+    TObjectPtr<USoundAttenuation> MonsterFootstepAttenuation;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Monster|Audio|Footsteps", meta = (ClampMin = "50.0"))
+    float MonsterFootstepStrideDistance = 190.0f;
+
+    void FadeOutCorridorChaseMusic(float FadeDuration);
 
 protected:
     // Components
@@ -193,6 +217,17 @@ protected:
     int32 NoiseEventsSinceQuiet = 0;
     bool bInvestigatingNoise = false;
     bool bCorridorChaseMode = false;
+    bool bCorridorChaseActive = false;
+    float CorridorHazardCheckElapsed = 0.0f;
+    float CorridorMovementDebugElapsed = 0.0f;
+    float CorridorMovementDebugTimeRemaining = 0.0f;
+    FVector LastMonsterFootstepLocation = FVector::ZeroVector;
+    float MonsterFootstepDistanceAccumulator = 0.0f;
+    bool bHasLastMonsterFootstepLocation = false;
+    UPROPERTY()
+    TObjectPtr<UAudioComponent> CorridorChaseAudio;
+    UPROPERTY()
+    TObjectPtr<UAudioComponent> CorridorChaseMusicAudio;
 
     UPROPERTY(EditAnywhere, Category = "Config|Noise", meta = (ClampMin = "1"))
     int32 NoiseEventsToPeek = 3;

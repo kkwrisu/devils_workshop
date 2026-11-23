@@ -1,7 +1,6 @@
 #include "ItemPickup.h"
 
 #include "Components/StaticMeshComponent.h"
-#include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
 #include "InventoryComponent.h"
 #include "ItemData.h"
@@ -31,10 +30,7 @@ bool AItemPickup::TryPickup(APlayerBase* Player)
 	const int32 NewId = Player->Inventory->AddItem(ItemData);
 	if (NewId == INDEX_NONE) return false;
 
-	if (PickupSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, PickupSound, GetActorLocation());
-	}
+	Player->PlayPickupSound(PickupSound, GetActorLocation());
 
 	UE_LOG(LogTemp, Warning, TEXT("ItemPickup '%s': item '%s' foi para o inventario"), *GetName(), *ItemData->GetName());
 	Destroy();

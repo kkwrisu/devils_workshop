@@ -143,7 +143,7 @@ protected:
     void ApplyMorphTarget(const FRepairStep& Step, float Progress);
 
     // Spawna partícula/som no socket
-    void SpawnEffectAtSocket(const FRepairStep& Step, FName SocketName, TObjectPtr<UParticleSystem> Particle, TObjectPtr<USoundBase> Sound);
+    void SpawnEffectAtSocket(const FRepairStep& Step, FName SocketName, TObjectPtr<UParticleSystem> Particle, TObjectPtr<USoundBase> Sound, float SoundPitch = 1.0f);
     void PlayWorkLoopSound(const FRepairStep& Step);
     void StopWorkLoopSound();
 

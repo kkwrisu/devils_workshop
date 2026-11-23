@@ -4,10 +4,14 @@
 #include "Components/PointLightComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/AudioComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/ShapeComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "EngineUtils.h"
+#include "Sound/SoundBase.h"
 #include "Components/Widget.h"
 #include "CollisionQueryParams.h"
 #include "Curves/CurveFloat.h"
@@ -32,6 +36,7 @@
 #include "TaskListWidget.h"
 #include "PrologueCompletedWidget.h"
 #include "CorridorReticleWidget.h"
+#include "Monster/MonsterBase.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -139,6 +144,29 @@ void APlayerBase::BeginPlay()
 {
 	Super::BeginPlay();
 
+	CorridorCabinets.Reset();
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		const FString ActorName = It->GetActorNameOrLabel();
+		if (ActorName.Contains(TEXT("Armario_Cai"), ESearchCase::IgnoreCase)
+			|| It->ActorHasTag(FName(TEXT("CabinetFall"))))
+		{
+			FCorridorCabinetFallState& Cabinet = CorridorCabinets.AddDefaulted_GetRef();
+			Cabinet.Actor = *It;
+			TArray<UPrimitiveComponent*> NavComponents;
+			It->GetComponents<UPrimitiveComponent>(NavComponents);
+			for (UPrimitiveComponent* Component : NavComponents)
+			{
+				if (Component)
+				{
+					Component->SetCanEverAffectNavigation(true);
+				}
+			}
+			UE_LOG(LogTemp, Warning, TEXT("PlayerBase: armario de queda encontrado: '%s'"), *ActorName);
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: encontrados %d armarios de queda (Armario_Cai / Armario_Cai_2 ou tag CabinetFall)"), CorridorCabinets.Num());
+
 	EnforceMinimumQuality();
 
 	DefaultCameraRelativeLocation = Camera->GetRelativeLocation();
@@ -212,6 +240,21 @@ void APlayerBase::BeginPlay()
 	}
 }
 
+void APlayerBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (WorkshopMovementAudio)
+	{
+		WorkshopMovementAudio->Stop();
+		WorkshopMovementAudio = nullptr;
+	}
+	if (CorridorMovementAudio)
+	{
+		CorridorMovementAudio->Stop();
+		CorridorMovementAudio = nullptr;
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
 void APlayerBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -253,6 +296,11 @@ void APlayerBase::Tick(float DeltaTime)
 	MoveTimeline.TickTimeline(DeltaTime);
 	CameraFocusTimeline.TickTimeline(DeltaTime);
 	InspectTimeline.TickTimeline(DeltaTime);
+	UpdatePursuitDoor(DeltaTime);
+	if (bIsInCorridor)
+	{
+		UpdateCorridorHazards(DeltaTime);
+	}
 
 	if (!CachedPlayerController) return;
 
@@ -529,6 +577,17 @@ void APlayerBase::ReportGameplayNoise(FName NoiseTagName, float Loudness, float 
 	OnPlayerMadeNoise.Broadcast(NoiseEvent);
 }
 
+void APlayerBase::PlayPickupSound(USoundBase* SoundOverride, const FVector& Location)
+{
+	USoundBase* SoundToPlay = SoundOverride ? SoundOverride : DefaultPickupSound.Get();
+	if (SoundToPlay)
+	{
+		const float PitchVariation = FMath::Clamp(PickupSoundPitchVariation, 0.0f, 0.15f);
+		const float Pitch = FMath::FRandRange(1.0f - PitchVariation, 1.0f + PitchVariation);
+		UGameplayStatics::PlaySoundAtLocation(this, SoundToPlay, Location, 1.0f, Pitch);
+	}
+}
+
 void APlayerBase::UpdateCorridorControls(float DeltaTime)
 {
 	if (!CachedPlayerController || DeltaTime <= 0.0f) return;
@@ -614,6 +673,10 @@ void APlayerBase::UpdateCorridorControls(float DeltaTime)
 	}
 
 	AddActorWorldOffset(AppliedDelta, false);
+	UpdateCorridorMovementAudio(
+		AppliedDelta.SizeSquared() > 0.25f,
+		bSprintPressed,
+		bIsCorridorCrouched);
 
 	if (!AppliedDelta.IsNearlyZero())
 	{
@@ -623,6 +686,87 @@ void APlayerBase::UpdateCorridorControls(float DeltaTime)
 			ReportGameplayNoise(FName(TEXT("Noise.Event.Footstep.Walk")), 0.7f, 2000.0f);
 			CorridorFootstepNoiseTimer = 0.0f;
 		}
+	}
+}
+
+void APlayerBase::UpdateWorkshopMovementAudio(bool bMoving)
+{
+	if (!WorkshopMovementSound) return;
+
+	if (bMoving)
+	{
+		if (!IsValid(WorkshopMovementAudio))
+		{
+			WorkshopMovementAudio = UGameplayStatics::SpawnSoundAttached(
+				WorkshopMovementSound, Root, NAME_None, FVector::ZeroVector,
+				EAttachLocation::KeepRelativeOffset, true);
+		}
+		if (WorkshopMovementAudio)
+		{
+			if (WorkshopMovementAudio->GetPlayState() == EAudioComponentPlayState::Paused)
+			{
+				WorkshopMovementAudio->SetPaused(false);
+			}
+			else if (WorkshopMovementAudio->GetPlayState() == EAudioComponentPlayState::Stopped)
+			{
+				WorkshopMovementAudio->Play();
+			}
+		}
+	}
+	else if (WorkshopMovementAudio && WorkshopMovementAudio->IsPlaying())
+	{
+		WorkshopMovementAudio->SetPaused(true);
+	}
+}
+
+void APlayerBase::UpdateCorridorMovementAudio(bool bMoving, bool bSprinting, bool bCrouching)
+{
+	if (!CorridorMovementSound) return;
+
+	if (bMoving)
+	{
+		if (!IsValid(CorridorMovementAudio))
+		{
+			CorridorMovementAudio = UGameplayStatics::SpawnSoundAttached(
+				CorridorMovementSound, Root, NAME_None, FVector::ZeroVector,
+				EAttachLocation::KeepRelativeOffset, true);
+		}
+		if (!CorridorMovementAudio) return;
+
+		const float Pitch = bCrouching ? CorridorCrouchSoundPitch
+			: (bSprinting ? CorridorRunSoundPitch : 1.0f);
+		CorridorMovementAudio->SetPitchMultiplier(Pitch);
+		CorridorMovementAudio->SetVolumeMultiplier(bCrouching ? CorridorCrouchSoundVolume : 1.0f);
+		CorridorMovementAudio->SetLowPassFilterEnabled(bCrouching);
+		if (bCrouching)
+		{
+			CorridorMovementAudio->SetLowPassFilterFrequency(CorridorCrouchLowPassFrequency);
+		}
+
+		if (CorridorMovementAudio->GetPlayState() == EAudioComponentPlayState::Paused)
+		{
+			CorridorMovementAudio->SetPaused(false);
+		}
+		else if (CorridorMovementAudio->GetPlayState() == EAudioComponentPlayState::Stopped)
+		{
+			CorridorMovementAudio->Play();
+		}
+	}
+	else if (CorridorMovementAudio && CorridorMovementAudio->IsPlaying())
+	{
+		CorridorMovementAudio->SetPaused(true);
+	}
+}
+
+void APlayerBase::PauseMovementAudio()
+{
+	if (WorkshopMovementAudio && WorkshopMovementAudio->IsPlaying())
+	{
+		WorkshopMovementAudio->SetPaused(true);
+	}
+	if (CorridorMovementAudio && CorridorMovementAudio->IsPlaying())
+	{
+		CorridorMovementAudio->SetPaused(true);
 	}
 }
 
@@ -737,6 +881,7 @@ void APlayerBase::UpdateCorridorReticle()
 
 void APlayerBase::SetCorridorMode(bool bEnable)
 {
+	PauseMovementAudio();
 	if (bIsInCorridor != bEnable)
 	{
 		TArray<AActor*> Chargers;
@@ -814,6 +959,18 @@ bool APlayerBase::TryUseCorridorDoor(AActor* DoorActor)
 	}
 
 	OnPlayerClosedDoor.Broadcast(DoorActor);
+	if (!bEnteringCorridor)
+	{
+		TArray<AActor*> Chargers;
+		UGameplayStatics::GetAllActorsOfClass(this, ABatteryCharger::StaticClass(), Chargers);
+		for (AActor* Actor : Chargers)
+		{
+			if (ABatteryCharger* Charger = Cast<ABatteryCharger>(Actor))
+			{
+				Charger->HandlePlayerExitingThroughDoor(this, DoorActor);
+			}
+		}
+	}
 	PositionHistory.Reset();
 	PositionLookHistory.Reset();
 	CurrentAreaActor = nullptr;
@@ -1032,6 +1189,14 @@ void APlayerBase::MoveToPosition(const FTransform& Target)
 	const float EffectiveMoveDuration = FMath::Max(MoveLength, FMath::Max(DistanceDuration, RotationDuration));
 	const float TimelinePlayRate = MoveLength / EffectiveMoveDuration;
 	MoveTimeline.SetPlayRate(TimelinePlayRate);
+	const bool bWalkingBetweenWorkshopPoints = !bIsInCorridor
+		&& !bChangeCorridorModeAfterMove
+		&& MoveDistance > 1.0f;
+	UpdateWorkshopMovementAudio(bWalkingBetweenWorkshopPoints);
+	if (bChangeCorridorModeAfterMove || bIsInCorridor)
+	{
+		PauseMovementAudio();
+	}
 	UE_LOG(LogTemp, Warning,
 		TEXT("[CameraMove %d] START | Area=%s | Distance=%.1f | Turn=%.1fdeg | Duration=%.2fs | PlayRate=%.3f | StartLoc=%s | TargetLoc=%s | StartRot=%s | TargetRot=%s | CameraWorldRot=%s"),
 		CameraMoveDebugId,
@@ -1086,6 +1251,7 @@ void APlayerBase::OnMoveUpdate(float Alpha)
 
 void APlayerBase::OnMoveFinished()
 {
+	PauseMovementAudio();
 	SetActorLocationAndRotation(TargetLocation, TargetRotation);
 	Camera->SetRelativeLocation(DefaultCameraRelativeLocation);
 	Camera->SetWorldRotation(TargetRotation);
@@ -1131,6 +1297,176 @@ void APlayerBase::StartCameraFocus(AActor* FocusActor)
 	CameraFocusTimeline.PlayFromStart();
 }
 
+void APlayerBase::StartMonsterReveal(AMonsterBase* Monster)
+{
+	if (!IsValid(Monster) || !Camera || !bIsInCorridor || IsTransitioning || bIsCameraFocused)
+	{
+		if (IsValid(Monster)) Monster->StartCorridorChase(this);
+		return;
+	}
+
+	FocusStartLocation = Camera->GetRelativeLocation();
+	FocusTargetLocation = FocusStartLocation;
+	FocusStartRotation = Camera->GetRelativeRotation();
+
+	const FRotator WorldLookRotation = UKismetMathLibrary::FindLookAtRotation(
+		Camera->GetComponentLocation(),
+		Monster->GetActorLocation() + FVector(0.0f, 0.0f, Monster->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()));
+	FocusTargetRotation = GetActorTransform().InverseTransformRotation(WorldLookRotation.Quaternion()).Rotator();
+	FocusTargetRotation.Roll = 0.0f;
+	PendingCorridorRevealMonster = Monster;
+	bIsCameraFocused = true;
+	bExitingCameraFocus = false;
+	IsTransitioning = true;
+	CameraFocusTimeline.SetPlayRate(CameraFocusLength / FMath::Max(MonsterRevealDuration, 0.1f));
+	CameraFocusTimeline.PlayFromStart();
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: revelando monstro; camera virando para o ponto de surgimento"));
+}
+
+void APlayerBase::ClosePursuitDoor(AActor* DoorActor, USoundBase* DoorSound)
+{
+	if (!IsValid(DoorActor) || bPursuitDoorClosing) return;
+
+	PursuitDoorToClose = DoorActor;
+	PursuitDoorStartLocation = DoorActor->GetActorLocation();
+	PursuitDoorTargetLocation = PursuitDoorStartLocation;
+	PursuitDoorTargetLocation.X = 643.0f;
+	PursuitDoorStartRotation = DoorActor->GetActorRotation();
+	PursuitDoorTargetRotation = PursuitDoorStartRotation;
+	PursuitDoorTargetRotation.Yaw = -40.0f;
+	PursuitDoorCloseElapsed = 0.0f;
+	bPursuitDoorClosing = true;
+	PursuitDoorCloseDuration = 0.7f;
+	if (DoorSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, DoorSound, DoorActor->GetActorLocation());
+	}
+	ReportGameplayNoise(FName(TEXT("Noise.Event.Door.Close")), 1.0f, 2600.0f);
+	UE_LOG(LogTemp, Warning,
+		TEXT("PlayerBase: porta_corredor fechando durante perseguicao | Yaw %.1f -> -40.0 | X %.1f -> 643.0"),
+		PursuitDoorStartRotation.Yaw, PursuitDoorStartLocation.X);
+}
+
+void APlayerBase::UpdatePursuitDoor(float DeltaTime)
+{
+	if (!bPursuitDoorClosing) return;
+	AActor* DoorActor = PursuitDoorToClose.Get();
+	if (!IsValid(DoorActor))
+	{
+		bPursuitDoorClosing = false;
+		PursuitDoorToClose.Reset();
+		return;
+	}
+
+	PursuitDoorCloseElapsed += DeltaTime;
+	const float Alpha = FMath::Clamp(PursuitDoorCloseElapsed / FMath::Max(PursuitDoorCloseDuration, 0.01f), 0.0f, 1.0f);
+	const float SmoothAlpha = FMath::InterpEaseInOut(0.0f, 1.0f, Alpha, 2.0f);
+	DoorActor->SetActorLocation(FMath::Lerp(PursuitDoorStartLocation, PursuitDoorTargetLocation, SmoothAlpha));
+	DoorActor->SetActorRotation(FMath::Lerp(PursuitDoorStartRotation, PursuitDoorTargetRotation, SmoothAlpha));
+	if (Alpha >= 1.0f)
+	{
+		DoorActor->SetActorLocation(PursuitDoorTargetLocation);
+		DoorActor->SetActorRotation(PursuitDoorTargetRotation);
+		bPursuitDoorClosing = false;
+		PursuitDoorToClose.Reset();
+	}
+}
+
+void APlayerBase::CheckMonsterProximityToCabinets(const FVector& MonsterLocation)
+{
+	if (!bIsInCorridor) return;
+
+	for (FCorridorCabinetFallState& Cabinet : CorridorCabinets)
+	{
+		AActor* CabinetActor = Cabinet.Actor.Get();
+		if (!IsValid(CabinetActor)) continue;
+		if (Cabinet.bTriggered) continue;
+
+		const FBox CabinetBounds = CabinetActor->GetComponentsBoundingBox(true);
+		if (!CabinetBounds.IsValid) continue;
+		const FVector ClosestPointOnCabinet(
+			FMath::Clamp(MonsterLocation.X, CabinetBounds.Min.X, CabinetBounds.Max.X),
+			FMath::Clamp(MonsterLocation.Y, CabinetBounds.Min.Y, CabinetBounds.Max.Y),
+			MonsterLocation.Z);
+
+		const float DistanceSquared = FVector::DistSquared2D(MonsterLocation, ClosestPointOnCabinet);
+		if (DistanceSquared <= FMath::Square(CabinetFallTriggerDistance))
+		{
+			Cabinet.bMonsterEnteredTriggerRange = true;
+			continue;
+		}
+
+		const float SafeFallDistance = CabinetFallTriggerDistance + CabinetFallClearanceDistance;
+		if (!Cabinet.bMonsterEnteredTriggerRange || DistanceSquared < FMath::Square(SafeFallDistance))
+		{
+			continue;
+		}
+
+		Cabinet.bTriggered = true;
+		Cabinet.Pivot = FVector(CabinetBounds.GetCenter().X, CabinetBounds.GetCenter().Y, CabinetBounds.Min.Z);
+		Cabinet.FloorZ = CabinetBounds.Min.Z;
+		FHitResult FloorHit;
+		FCollisionQueryParams FloorTraceParams(SCENE_QUERY_STAT(CabinetFloorHeight), false);
+		FloorTraceParams.AddIgnoredActor(this);
+		FloorTraceParams.AddIgnoredActor(CabinetActor);
+		const FVector FloorTraceStart(Cabinet.Pivot.X, Cabinet.Pivot.Y, CabinetBounds.Max.Z + 100.0f);
+		const FVector FloorTraceEnd(Cabinet.Pivot.X, Cabinet.Pivot.Y, CabinetBounds.Min.Z - 5000.0f);
+		if (GetWorld()->LineTraceSingleByChannel(FloorHit, FloorTraceStart, FloorTraceEnd, ECC_WorldStatic, FloorTraceParams))
+		{
+			Cabinet.FloorZ = FloorHit.ImpactPoint.Z;
+		}
+		Cabinet.StartLocation = CabinetActor->GetActorLocation();
+		Cabinet.StartRotation = CabinetActor->GetActorRotation();
+		const FVector ToMonster = (MonsterLocation - CabinetActor->GetActorLocation()).GetSafeNormal2D();
+		const float FallSign = FVector::DotProduct(ToMonster, CabinetActor->GetActorForwardVector()) >= 0.0f ? 1.0f : -1.0f;
+		const FString CabinetName = CabinetActor->GetActorNameOrLabel();
+		const bool bIsArmarioCai2 = CabinetName.Contains(TEXT("Armario_Cai_2"), ESearchCase::IgnoreCase);
+		const bool bIsArmarioCai1 = !bIsArmarioCai2 && CabinetName.Contains(TEXT("Armario_Cai"), ESearchCase::IgnoreCase);
+		const float RollSign = bIsArmarioCai1 ? 1.0f : (bIsArmarioCai2 ? 1.0f : FallSign);
+		// FRotator fields are ordered Pitch, Yaw, Roll. The cabinets must tip around Roll (X axis).
+		Cabinet.TargetRotation = Cabinet.StartRotation + FRotator(0.0f, 0.0f, CabinetFallAngle * RollSign);
+		Cabinet.Elapsed = 0.0f;
+
+		if (CabinetFallSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(
+				this, CabinetFallSound, CabinetActor->GetActorLocation(),
+				1.0f, 1.0f, 0.0f, CabinetFallAttenuation);
+		}
+		ReportGameplayNoise(FName(TEXT("Noise.Event.Cabinet.Fall")), 1.0f, 2600.0f);
+		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: monstro passou do armario '%s'; queda acionada | Roll %.1f -> %.1f"),
+			*CabinetName, Cabinet.StartRotation.Roll, Cabinet.TargetRotation.Roll);
+	}
+}
+
+void APlayerBase::UpdateCorridorHazards(float DeltaTime)
+{
+	for (FCorridorCabinetFallState& Cabinet : CorridorCabinets)
+	{
+		AActor* CabinetActor = Cabinet.Actor.Get();
+		if (!IsValid(CabinetActor) || !Cabinet.bTriggered) continue;
+		if (Cabinet.bTriggered && Cabinet.Elapsed < CabinetFallDuration)
+		{
+			Cabinet.Elapsed += DeltaTime;
+			const float Alpha = FMath::Clamp(Cabinet.Elapsed / FMath::Max(CabinetFallDuration, 0.01f), 0.0f, 1.0f);
+			const float SmoothAlpha = FMath::InterpEaseInOut(0.0f, 1.0f, Alpha, 2.0f);
+			const FRotator CurrentRotation = FMath::Lerp(Cabinet.StartRotation, Cabinet.TargetRotation, SmoothAlpha);
+			const FQuat DeltaRotation = CurrentRotation.Quaternion() * Cabinet.StartRotation.Quaternion().Inverse();
+			const FVector CurrentLocation = Cabinet.Pivot + DeltaRotation.RotateVector(Cabinet.StartLocation - Cabinet.Pivot);
+			CabinetActor->SetActorLocationAndRotation(CurrentLocation, CurrentRotation);
+
+			// Keep the lowest point of the rotated mesh at the original floor height.
+			const FBox RotatedBounds = CabinetActor->GetComponentsBoundingBox(true);
+			if (RotatedBounds.IsValid && RotatedBounds.Min.Z < Cabinet.FloorZ)
+			{
+				FVector FloorCorrectedLocation = CabinetActor->GetActorLocation();
+				FloorCorrectedLocation.Z += Cabinet.FloorZ - RotatedBounds.Min.Z;
+				CabinetActor->SetActorLocation(FloorCorrectedLocation, false, nullptr, ETeleportType::TeleportPhysics);
+			}
+		}
+	}
+}
+
 void APlayerBase::ExitCameraFocus()
 {
 	if (!bIsCameraFocused || IsTransitioning) return;
@@ -1151,6 +1487,22 @@ void APlayerBase::OnCameraFocusUpdate(float Alpha)
 void APlayerBase::OnCameraFocusFinished()
 {
 	IsTransitioning = false;
+	CameraFocusTimeline.SetPlayRate(1.0f);
+
+	if (AMonsterBase* RevealMonster = PendingCorridorRevealMonster.Get())
+	{
+		PendingCorridorRevealMonster.Reset();
+		bIsCameraFocused = false;
+		bExitingCameraFocus = false;
+		LookYawOffset = FRotator::NormalizeAxis(FocusTargetRotation.Yaw);
+		LookPitchOffset = FMath::Clamp(FocusTargetRotation.Pitch, -CorridorPitchLimit, CorridorPitchLimit);
+		CorridorTargetYawOffset = static_cast<float>(LookYawOffset);
+		CorridorTargetPitchOffset = static_cast<float>(LookPitchOffset);
+		UpdateCameraRotation();
+		RevealMonster->StartCorridorChase(this);
+		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: revelacao concluida; controles restaurados e perseguicao iniciada"));
+		return;
+	}
 
 	if (bExitingCameraFocus)
 	{

@@ -112,13 +112,25 @@ struct FRepairStep : public FTableRowBase
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Audio")
     TObjectPtr<USoundBase> StartSound;
 
+    /** Multiplicador de pitch para o som de início (ex.: 1.0 desmontagem, 0.9 montagem). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Audio", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+    float StartSoundPitch = 1.0f;
+
     /** Som tocado no socket ao completar (opcional) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Audio")
     TObjectPtr<USoundBase> CompleteSound;
 
+    /** Multiplicador de pitch para o som de conclusão (ex.: 1.0 desmontagem, 0.9 montagem). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Audio", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+    float CompleteSoundPitch = 1.0f;
+
     /** Som de "trabalhando" em loop enquanto segura (opcional) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Audio")
     TObjectPtr<USoundBase> WorkLoopSound;
+
+    /** Pitch do som contínuo enquanto o jogador trabalha neste passo. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reparo|Audio", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+    float WorkLoopSoundPitch = 1.0f;
 
     // --- Feedback de Curva (opcional, para animações não-lineares) ---
     /** Curva de progresso visual (X = tempo normalizado 0-1, Y = progresso visual 0-1). Linear se nulo. */

@@ -490,7 +490,7 @@ bool URepairableComponent::BeginStep(FName StepId)
             // Efeitos de início
             if (!Step.EffectSocketName.IsNone())
             {
-                SpawnEffectAtSocket(Step, Step.EffectSocketName, Step.StartParticle, Step.StartSound);
+                SpawnEffectAtSocket(Step, Step.EffectSocketName, Step.StartParticle, Step.StartSound, Step.StartSoundPitch);
             }
 
             // Broadcast
@@ -542,7 +542,8 @@ void URepairableComponent::CompleteActiveStep()
     // Efeitos de conclusão
     if (!CompletedSocket.IsNone())
     {
-        SpawnEffectAtSocket(CompletedStep, CompletedSocket, CompletedStep.CompleteParticle, CompletedStep.CompleteSound);
+        SpawnEffectAtSocket(CompletedStep, CompletedSocket, CompletedStep.CompleteParticle,
+            CompletedStep.CompleteSound, CompletedStep.CompleteSoundPitch);
     }
 
     StopWorkLoopSound();
@@ -619,7 +620,12 @@ void URepairableComponent::AdvanceToNextStep()
     UE_LOG(LogTemp, Log, TEXT("RepairableComponent [%s]: REPARO COMPLETO!"), *GetOwner()->GetName());
 }
 
-void URepairableComponent::SpawnEffectAtSocket(const FRepairStep& Step, FName SocketName, TObjectPtr<UParticleSystem> Particle, TObjectPtr<USoundBase> Sound)
+void URepairableComponent::SpawnEffectAtSocket(
+    const FRepairStep& Step,
+    FName SocketName,
+    TObjectPtr<UParticleSystem> Particle,
+    TObjectPtr<USoundBase> Sound,
+    float SoundPitch)
 {
     if (!TargetMeshComponent) return;
 
@@ -639,7 +645,8 @@ void URepairableComponent::SpawnEffectAtSocket(const FRepairStep& Step, FName So
 
     if (Sound)
     {
-        UGameplayStatics::PlaySoundAtLocation(GetWorld(), Sound, SocketTransform.GetLocation());
+        UGameplayStatics::PlaySoundAtLocation(
+            GetWorld(), Sound, SocketTransform.GetLocation(), 1.0f, FMath::Clamp(SoundPitch, 0.1f, 2.0f));
     }
 }
 
@@ -663,6 +670,10 @@ void URepairableComponent::PlayWorkLoopSound(const FRepairStep& Step)
         EAttachLocation::SnapToTarget,
         true // bStopWhenAttachedToDestroyed
     );
+	if (WorkLoopAudioComponent)
+	{
+		WorkLoopAudioComponent->SetPitchMultiplier(FMath::Clamp(Step.WorkLoopSoundPitch, 0.1f, 2.0f));
+	}
 }
 
 void URepairableComponent::StopWorkLoopSound()

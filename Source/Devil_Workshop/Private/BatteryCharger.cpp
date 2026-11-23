@@ -78,18 +78,17 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 	{
 		LoopAudio = UGameplayStatics::SpawnSoundAttached(
 			ChargingLoopSound, GetRootComponent(), NAME_None, FVector::ZeroVector,
-			EAttachLocation::KeepRelativeOffset, true);
+			EAttachLocation::KeepRelativeOffset, true, 1.0f, 1.0f, 0.0f,
+			nullptr, nullptr, false);
+		if (LoopAudio)
+		{
+			// Loop even when the assigned asset is a one-shot Sound Wave.
+			LoopAudio->OnAudioFinishedNative.AddUObject(this, &ABatteryCharger::HandleChargingAudioFinished);
+		}
 	}
 
 	SetActorTickEnabled(true);
 	OnChargeStarted.Broadcast();
-	if (APlayerBase* Player = EncounterPlayer.Get(); Player && Player->IsInCorridor())
-	{
-		GetWorldTimerManager().SetTimer(
-			MonsterSpawnTimerHandle, this, &ABatteryCharger::SpawnCorridorMonster,
-			FMath::Max(MonsterSpawnDelay, 0.1f), false);
-		UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': monstro agendado para surgir em %.1f s"), *GetName(), MonsterSpawnDelay);
-	}
 	ReportHearingNoise(FName("BatteryCharging"), ChargingNoiseLoudness, ChargingNoiseRange);
 
 	UE_LOG(LogTemp, Warning, TEXT("Carregador '%s': carregando '%s' por %.1f s"), *GetName(), *Item.Data->GetName(), ChargeDuration);
@@ -104,37 +103,64 @@ void ABatteryCharger::HandlePlayerCorridorChanged(APlayerBase* Player, bool bEnt
 
 	if (!bEnteredCorridor)
 	{
-		GetWorldTimerManager().ClearTimer(MonsterSpawnTimerHandle);
 		if (AMonsterBase* Monster = CorridorMonster.Get())
 		{
 			Monster->Destroy();
-			UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': jogador saiu do corredor; perseguição encerrada"), *GetName());
+			UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': player exited corridor; chase stopped"), *GetName());
 		}
 		CorridorMonster.Reset();
-		return;
-	}
-
-	// Se ainda estiver carregando e o jogador retornar antes do surgimento,
-	// inicia uma nova janela de 15 segundos dentro do corredor.
-	if (State == EChargerState::Charging && !bMonsterSpawnedForCurrentBattery && !GetWorldTimerManager().IsTimerActive(MonsterSpawnTimerHandle))
-	{
-		GetWorldTimerManager().SetTimer(
-			MonsterSpawnTimerHandle, this, &ABatteryCharger::SpawnCorridorMonster,
-			FMath::Max(MonsterSpawnDelay, 0.1f), false);
 	}
 }
 
-void ABatteryCharger::SpawnCorridorMonster()
+bool ABatteryCharger::IsPursuingPlayer(const APlayerBase* Player) const
 {
-	APlayerBase* Player = EncounterPlayer.Get();
-	if (State != EChargerState::Charging || !IsValid(Player) || !Player->IsInCorridor())
+	const AMonsterBase* Monster = CorridorMonster.Get();
+	return Player && EncounterPlayer.Get() == Player && IsValid(Monster) && Monster->IsCorridorChasing();
+}
+
+void ABatteryCharger::HandlePlayerExitingThroughDoor(APlayerBase* Player, AActor* DoorActor)
+{
+	if (!IsValid(Player) || !IsValid(DoorActor)) return;
+	const bool bPursuitActive = IsPursuingPlayer(Player);
+	UE_LOG(LogTemp, Warning,
+		TEXT("BatteryCharger '%s': jogador tentando sair pela porta '%s' durante perseguição=%d"),
+		*GetName(), *DoorActor->GetActorNameOrLabel(), bPursuitActive);
+	if (!bPursuitActive) return;
+	if (AMonsterBase* Monster = CorridorMonster.Get())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': surgimento cancelado; carregamento/player/corredor inválido"), *GetName());
+		// Match the 0.7s door animation so the music fades out as the door shuts.
+		Monster->FadeOutCorridorChaseMusic(0.7f);
+	}
+
+	AActor* PhysicalDoor = DoorActor;
+	if (!DoorActor->GetActorNameOrLabel().Contains(TEXT("porta_corredor"), ESearchCase::IgnoreCase))
+	{
+		TArray<AActor*> WorldActors;
+		UGameplayStatics::GetAllActorsOfClass(this, AActor::StaticClass(), WorldActors);
+		for (AActor* Candidate : WorldActors)
+		{
+			if (IsValid(Candidate)
+				&& Candidate->GetActorNameOrLabel().Contains(TEXT("porta_corredor"), ESearchCase::IgnoreCase))
+			{
+				PhysicalDoor = Candidate;
+				break;
+			}
+		}
+	}
+
+	Player->ClosePursuitDoor(PhysicalDoor, PursuitDoorCloseSound);
+}
+
+void ABatteryCharger::SpawnCorridorMonster(APlayerBase* Player)
+{
+	if (!IsValid(Player) || !Player->IsInCorridor())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': player must be in the corridor when collecting the charged battery"), *GetName());
 		return;
 	}
 	if (!CorridorMonsterClass)
 	{
-		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': CorridorMonsterClass não foi configurado"), *GetName());
+		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': CorridorMonsterClass is not configured"), *GetName());
 		return;
 	}
 
@@ -142,7 +168,7 @@ void ABatteryCharger::SpawnCorridorMonster()
 	UGameplayStatics::GetAllActorsWithTag(this, MonsterSpawnPointTag, SpawnPoints);
 	if (SpawnPoints.IsEmpty())
 	{
-		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': nenhum ponto com tag '%s' na fase"), *GetName(), *MonsterSpawnPointTag.ToString());
+		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': no spawn point with tag '%s' in level"), *GetName(), *MonsterSpawnPointTag.ToString());
 		return;
 	}
 
@@ -152,19 +178,23 @@ void ABatteryCharger::SpawnCorridorMonster()
 		CorridorMonsterClass, SpawnPoints[0]->GetActorTransform(), SpawnParams);
 	if (!SpawnedMonster)
 	{
-		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': falha ao criar monstro"), *GetName());
+		UE_LOG(LogTemp, Error, TEXT("BatteryCharger '%s': failed to spawn monster"), *GetName());
 		return;
 	}
 
 	CorridorMonster = SpawnedMonster;
 	bMonsterSpawnedForCurrentBattery = true;
-	SpawnedMonster->StartCorridorChase(Player);
-	UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': monstro '%s' surgiu no corredor"), *GetName(), *SpawnedMonster->GetName());
+	EncounterPlayer = Player;
+	SpawnedMonster->PrepareCorridorReveal();
+	if (MonsterArrivalSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, MonsterArrivalSound, SpawnedMonster->GetActorLocation());
+	}
+	Player->StartMonsterReveal(SpawnedMonster);
+	UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': monster '%s' spawned after charged battery pickup"), *GetName(), *SpawnedMonster->GetName());
 }
-
 void ABatteryCharger::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	GetWorldTimerManager().ClearTimer(MonsterSpawnTimerHandle);
 	if (AMonsterBase* Monster = CorridorMonster.Get())
 	{
 		Monster->Destroy();
@@ -217,6 +247,16 @@ void ABatteryCharger::FinishCharging()
 	UE_LOG(LogTemp, Warning, TEXT("Carregador '%s': carga completa"), *GetName());
 }
 
+void ABatteryCharger::HandleChargingAudioFinished(UAudioComponent* FinishedComponent)
+{
+	// OnAudioFinishedNative also fires when Stop() is called. State changes to Done
+	// before FinishCharging stops this component, so that stop will not restart it.
+	if (State == EChargerState::Charging && IsValid(LoopAudio) && FinishedComponent == LoopAudio)
+	{
+		LoopAudio->Play();
+	}
+}
+
 bool ABatteryCharger::TryCollect(APlayerBase* Player)
 {
 	if (State != EChargerState::Done || !StoredItemData || !Player || !Player->Inventory) return false;
@@ -225,11 +265,17 @@ bool ABatteryCharger::TryCollect(APlayerBase* Player)
 	if (NewId == INDEX_NONE) return false;
 
 	Player->Inventory->SetItemFlag(NewId, ChargedFlag, true);
+	Player->PlayPickupSound(nullptr, GetActorLocation());
+	EncounterPlayer = Player;
 
 	StoredItemData = nullptr;
 	ChargeInstigator.Reset();
 	BatteryMesh->SetVisibility(false);
 	State = EChargerState::Empty;
+	if (!bMonsterSpawnedForCurrentBattery)
+	{
+		SpawnCorridorMonster(Player);
+	}
 
 	UE_LOG(LogTemp, Warning, TEXT("Carregador '%s': bateria carregada devolvida ao jogador"), *GetName());
 	return true;
