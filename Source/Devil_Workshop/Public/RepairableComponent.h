@@ -146,6 +146,7 @@ protected:
     void SpawnEffectAtSocket(const FRepairStep& Step, FName SocketName, TObjectPtr<UParticleSystem> Particle, TObjectPtr<USoundBase> Sound, float SoundPitch = 1.0f);
     void PlayWorkLoopSound(const FRepairStep& Step);
     void StopWorkLoopSound();
+    void HandleWorkLoopAudioFinished(UAudioComponent* FinishedComponent);
 
     // Encontra componente de mesh (Skeletal ou Static) para morph targets
     USkeletalMeshComponent* GetSkeletalMesh() const;

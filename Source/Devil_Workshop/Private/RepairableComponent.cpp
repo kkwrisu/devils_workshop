@@ -66,6 +66,10 @@ void URepairableComponent::LoadStepsFromDataTable()
         if (Row)
         {
             RepairSteps.Add(*Row);
+			UE_LOG(LogTemp, Warning,
+				TEXT("RepairableComponent [%s]: áudio DataTable | Step=%s | Socket=%s | Start=%s | Complete=%s | WorkLoop=%s"),
+				*GetNameSafe(GetOwner()), *Row->StepId.ToString(), *Row->EffectSocketName.ToString(),
+				*GetNameSafe(Row->StartSound.Get()), *GetNameSafe(Row->CompleteSound.Get()), *GetNameSafe(Row->WorkLoopSound.Get()));
         }
     }
 
@@ -487,10 +491,15 @@ bool URepairableComponent::BeginStep(FName StepId)
             // Aplica morph target inicial
             ApplyMorphTarget(Step, Step.CurrentProgress);
 
-            // Efeitos de início
-            if (!Step.EffectSocketName.IsNone())
+            // Efeitos de início. Sem socket, o helper usa a posição do objeto.
+            if (Step.StartParticle || Step.StartSound)
             {
                 SpawnEffectAtSocket(Step, Step.EffectSocketName, Step.StartParticle, Step.StartSound, Step.StartSoundPitch);
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: passo '%s' sem StartSound/StartParticle configurado"),
+                    *GetOwner()->GetName(), *Step.StepId.ToString());
             }
 
             // Broadcast
@@ -539,11 +548,16 @@ void URepairableComponent::CompleteActiveStep()
         }
     }
 
-    // Efeitos de conclusão
-    if (!CompletedSocket.IsNone())
+    // Efeitos de conclusão. Sem socket, o helper usa a posição do objeto.
+    if (CompletedStep.CompleteParticle || CompletedStep.CompleteSound)
     {
         SpawnEffectAtSocket(CompletedStep, CompletedSocket, CompletedStep.CompleteParticle,
             CompletedStep.CompleteSound, CompletedStep.CompleteSoundPitch);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: passo '%s' sem CompleteSound/CompleteParticle configurado"),
+            *GetOwner()->GetName(), *CompletedStep.StepId.ToString());
     }
 
     StopWorkLoopSound();
@@ -627,62 +641,99 @@ void URepairableComponent::SpawnEffectAtSocket(
     TObjectPtr<USoundBase> Sound,
     float SoundPitch)
 {
-    if (!TargetMeshComponent) return;
-
+    const AActor* Owner = GetOwner();
+    FVector EffectLocation = Owner ? Owner->GetActorLocation() : FVector::ZeroVector;
     USceneComponent* MeshComp = TargetMeshComponent;
-    if (!MeshComp->DoesSocketExist(SocketName))
+    if (MeshComp && !SocketName.IsNone() && MeshComp->DoesSocketExist(SocketName))
     {
-        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: Socket '%s' não existe no mesh!"), *GetOwner()->GetName(), *SocketName.ToString());
-        return;
+        EffectLocation = MeshComp->GetSocketLocation(SocketName);
     }
-
-    const FTransform SocketTransform = MeshComp->GetSocketTransform(SocketName, RTS_World);
+    else if (!SocketName.IsNone())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: socket '%s' ausente; tocando efeito na posição do rádio"),
+            *GetNameSafe(Owner), *SocketName.ToString());
+        if (MeshComp)
+        {
+            EffectLocation = MeshComp->GetComponentLocation();
+        }
+    }
 
     if (Particle)
     {
-        UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), Particle, SocketTransform);
+        UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), Particle, EffectLocation);
     }
 
     if (Sound)
     {
         UGameplayStatics::PlaySoundAtLocation(
-            GetWorld(), Sound, SocketTransform.GetLocation(), 1.0f, FMath::Clamp(SoundPitch, 0.1f, 2.0f));
+            GetWorld(), Sound, EffectLocation, 1.0f, FMath::Clamp(SoundPitch, 0.1f, 2.0f));
     }
 }
 
 void URepairableComponent::PlayWorkLoopSound(const FRepairStep& Step)
 {
-    if (!Step.WorkLoopSound || !TargetMeshComponent) return;
-
-    if (!TargetMeshComponent->DoesSocketExist(Step.EffectSocketName))
+    if (!Step.WorkLoopSound)
     {
+        UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: passo '%s' sem WorkLoopSound configurado"),
+            *GetNameSafe(GetOwner()), *Step.StepId.ToString());
         return;
     }
 
-    const FTransform SocketTransform = TargetMeshComponent->GetSocketTransform(Step.EffectSocketName, RTS_World);
+    if (WorkLoopAudioComponent)
+    {
+        WorkLoopAudioComponent->OnAudioFinishedNative.RemoveAll(this);
+        WorkLoopAudioComponent->Stop();
+        WorkLoopAudioComponent = nullptr;
+    }
 
-    WorkLoopAudioComponent = UGameplayStatics::SpawnSoundAttached(
-        Step.WorkLoopSound,
-        TargetMeshComponent,
-        Step.EffectSocketName,
-        FVector::ZeroVector,
-        FRotator::ZeroRotator,
-        EAttachLocation::SnapToTarget,
-        true // bStopWhenAttachedToDestroyed
-    );
+    if (TargetMeshComponent)
+    {
+        WorkLoopAudioComponent = UGameplayStatics::SpawnSoundAttached(
+            Step.WorkLoopSound, TargetMeshComponent, NAME_None, FVector::ZeroVector,
+            EAttachLocation::KeepRelativeOffset, true, 1.0f,
+            FMath::Clamp(Step.WorkLoopSoundPitch, 0.1f, 2.0f), 0.0f, nullptr, nullptr, false);
+    }
+    else if (GetOwner())
+    {
+        WorkLoopAudioComponent = UGameplayStatics::SpawnSoundAtLocation(
+            GetWorld(), Step.WorkLoopSound, GetOwner()->GetActorLocation(), FRotator::ZeroRotator,
+            1.0f, FMath::Clamp(Step.WorkLoopSoundPitch, 0.1f, 2.0f), 0.0f, nullptr, nullptr, false);
+    }
+
 	if (WorkLoopAudioComponent)
 	{
-		WorkLoopAudioComponent->SetPitchMultiplier(FMath::Clamp(Step.WorkLoopSoundPitch, 0.1f, 2.0f));
+		WorkLoopAudioComponent->OnAudioFinishedNative.AddUObject(this, &URepairableComponent::HandleWorkLoopAudioFinished);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("RepairableComponent [%s]: não conseguiu iniciar WorkLoopSound do passo '%s'"),
+			*GetNameSafe(GetOwner()), *Step.StepId.ToString());
 	}
 }
 
 void URepairableComponent::StopWorkLoopSound()
 {
-    if (WorkLoopAudioComponent && WorkLoopAudioComponent->IsPlaying())
+    if (WorkLoopAudioComponent)
     {
-        WorkLoopAudioComponent->Stop();
+        WorkLoopAudioComponent->OnAudioFinishedNative.RemoveAll(this);
+        if (WorkLoopAudioComponent->IsPlaying())
+        {
+            WorkLoopAudioComponent->Stop();
+        }
         WorkLoopAudioComponent = nullptr;
     }
+}
+
+void URepairableComponent::HandleWorkLoopAudioFinished(UAudioComponent* FinishedComponent)
+{
+    if (FinishedComponent != WorkLoopAudioComponent || !bIsRepairing || !CurrentUser.IsValid()
+        || !CurrentUser->IsClickHeld())
+    {
+        return;
+    }
+
+    // Keep a one-shot WorkLoopSound going for as long as the player holds the repair input.
+    FinishedComponent->Play();
 }
 
 USkeletalMeshComponent* URepairableComponent::GetSkeletalMesh() const

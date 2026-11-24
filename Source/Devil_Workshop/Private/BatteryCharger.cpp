@@ -2,6 +2,7 @@
 
 #include "Components/StaticMeshComponent.h"
 #include "Components/AudioComponent.h"
+#include "Sound/SoundAttenuation.h"
 #include "Engine/StaticMesh.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
@@ -82,8 +83,18 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 			nullptr, nullptr, false);
 		if (LoopAudio)
 		{
+			FSoundAttenuationSettings ChargingAttenuation;
+			ChargingAttenuation.bAttenuate = true;
+			ChargingAttenuation.bSpatialize = true;
+			ChargingAttenuation.AttenuationShape = EAttenuationShape::Sphere;
+			ChargingAttenuation.AttenuationShapeExtents = FVector(200.0f, 0.0f, 0.0f);
+			ChargingAttenuation.FalloffDistance = 1800.0f;
+			LoopAudio->SetAttenuationOverrides(ChargingAttenuation);
+			LoopAudio->SetOverrideAttenuation(true);
+			LoopAudio->bAllowSpatialization = true;
 			// Loop even when the assigned asset is a one-shot Sound Wave.
 			LoopAudio->OnAudioFinishedNative.AddUObject(this, &ABatteryCharger::HandleChargingAudioFinished);
+			UE_LOG(LogTemp, Log, TEXT("BatteryCharger '%s': charging audio started as 3D spatial sound"), *GetName());
 		}
 	}
 

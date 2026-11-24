@@ -61,7 +61,7 @@ public:
     float LoseSightRadius = 1800.0f;
 
     UPROPERTY(EditDefaultsOnly, Category = "AI|Perception")
-    float PeripheralVisionAngleDegrees = 90.0f;
+    float PeripheralVisionAngleDegrees = 180.0f;
 
     UPROPERTY(EditDefaultsOnly, Category = "AI|Perception")
     float HearingRange = 2000.0f;

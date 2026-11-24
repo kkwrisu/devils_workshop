@@ -111,6 +111,13 @@ public:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Monster|Audio|Footsteps", meta = (ClampMin = "50.0"))
     float MonsterFootstepStrideDistance = 190.0f;
 
+    // Draws the monster's actual collision capsule while playing, for placement/navigation debugging.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Monster|Debug")
+    bool bDrawDebugHitbox = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Monster|Navigation", meta = (ClampMin = "50.0"))
+    float ChaseObstacleProbeDistance = 350.0f;
+
     void FadeOutCorridorChaseMusic(float FadeDuration);
 
 protected:
@@ -198,6 +205,8 @@ protected:
     virtual void BuildNavigationGraph();
     virtual bool IsNodeAdjacentToPlayer(AActor* Node) const;
     virtual APlayerBase* GetPlayerPawn() const;
+    bool UpdateCorridorChaseMoveRequest();
+    void ProbeForCorridorObstacle();
 
     UFUNCTION()
     void OnStateTimerElapsed();
@@ -221,6 +230,14 @@ protected:
     float CorridorHazardCheckElapsed = 0.0f;
     float CorridorMovementDebugElapsed = 0.0f;
     float CorridorMovementDebugTimeRemaining = 0.0f;
+    float CorridorChaseRepathElapsed = 0.0f;
+    float CorridorChaseRetryElapsed = 0.0f;
+    float CorridorBehindRepathCooldown = 0.0f;
+    float CorridorObstacleProbeElapsed = 0.0f;
+    float CorridorObstacleRepathCooldown = 0.0f;
+    FVector LastCorridorChaseGoalLocation = FVector::ZeroVector;
+    bool bHasCorridorChaseGoal = false;
+    bool bCorridorObstacleWasAhead = false;
     FVector LastMonsterFootstepLocation = FVector::ZeroVector;
     float MonsterFootstepDistanceAccumulator = 0.0f;
     bool bHasLastMonsterFootstepLocation = false;

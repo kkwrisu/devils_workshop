@@ -41,6 +41,14 @@ AMonsterBase::AMonsterBase()
     GetCharacterMovement()->RotationRate = FRotator(0.0f, 480.0f, 0.0f);
     GetCharacterMovement()->MaxWalkSpeed = 300.0f;
     GetCharacterMovement()->bUseControllerDesiredRotation = false;
+	// The corridor Recast navmesh is baked for radius 35 / height 144.
+	// Keep the monster capsule inside that agent profile so pathfinding can use the corridor.
+	GetCapsuleComponent()->SetCapsuleSize(20.0f, 70.0f);
+	GetCharacterMovement()->NavAgentProps.AgentRadius = 20.0f;
+	GetCharacterMovement()->NavAgentProps.AgentHeight = 140.0f;
+	GetCharacterMovement()->SetAvoidanceEnabled(true);
+	GetCharacterMovement()->AvoidanceConsiderationRadius = 350.0f;
+	GetCharacterMovement()->AvoidanceWeight = 0.5f;
 
     // Capsule
     GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
@@ -60,6 +68,20 @@ AMonsterBase::AMonsterBase()
 void AMonsterBase::BeginPlay()
 {
     Super::BeginPlay();
+
+	// Reapply at runtime in case BP_EvilIgor contains older capsule defaults.
+	GetCapsuleComponent()->SetCapsuleSize(20.0f, 70.0f);
+	GetCharacterMovement()->NavAgentProps.AgentRadius = 20.0f;
+	GetCharacterMovement()->NavAgentProps.AgentHeight = 140.0f;
+	GetCharacterMovement()->SetAvoidanceEnabled(true);
+	GetCharacterMovement()->AvoidanceConsiderationRadius = 350.0f;
+	GetCharacterMovement()->AvoidanceWeight = 0.5f;
+	UE_LOG(LogTemp, Warning,
+		TEXT("MonsterBase '%s': spawn diagnostics | pos=%s | capsule radius=%.1f halfHeight=%.1f | nav agent radius=%.1f height=%.1f | controller=%s"),
+		*GetName(), *GetActorLocation().ToString(),
+		GetCapsuleComponent()->GetScaledCapsuleRadius(), GetCapsuleComponent()->GetScaledCapsuleHalfHeight(),
+		GetCharacterMovement()->NavAgentProps.AgentRadius, GetCharacterMovement()->NavAgentProps.AgentHeight,
+		*GetNameSafe(GetController()));
 
     // Initialize gameplay tags (only once)
     static bool bTagsInitialized = false;
@@ -117,6 +139,16 @@ void AMonsterBase::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
+	if (bDrawDebugHitbox && GetCapsuleComponent() && GetWorld())
+	{
+		float CapsuleRadius = 0.0f;
+		float CapsuleHalfHeight = 0.0f;
+		GetCapsuleComponent()->GetScaledCapsuleSize(CapsuleRadius, CapsuleHalfHeight);
+		const FColor HitboxColor = bCorridorChaseActive ? FColor::Red : FColor::Yellow;
+		DrawDebugCapsule(GetWorld(), GetCapsuleComponent()->GetComponentLocation(), CapsuleHalfHeight,
+			CapsuleRadius, GetCapsuleComponent()->GetComponentQuat(), HitboxColor, false, 0.0f, 0, 2.5f);
+	}
+
 	if (bHasLastMonsterFootstepLocation)
 	{
 		const FVector CurrentLocation = GetActorLocation();
@@ -142,6 +174,41 @@ void AMonsterBase::Tick(float DeltaTime)
 	{
 		if (bCorridorChaseActive)
 		{
+			CorridorBehindRepathCooldown = FMath::Max(0.0f, CorridorBehindRepathCooldown - DeltaTime);
+			CorridorObstacleProbeElapsed += DeltaTime;
+			CorridorObstacleRepathCooldown = FMath::Max(0.0f, CorridorObstacleRepathCooldown - DeltaTime);
+			if (CorridorObstacleProbeElapsed >= 0.05f)
+			{
+				CorridorObstacleProbeElapsed = 0.0f;
+				ProbeForCorridorObstacle();
+			}
+
+			CorridorChaseRepathElapsed += DeltaTime;
+			CorridorChaseRetryElapsed += DeltaTime;
+			if (CorridorChaseRepathElapsed >= 0.35f)
+			{
+				CorridorChaseRepathElapsed = 0.0f;
+				AAIController* ChaseController = Cast<AAIController>(GetController());
+				if (IsValid(PerceivedTarget) && ChaseController)
+				{
+					UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+					FNavLocation ProjectedGoal;
+					const bool bGoalProjects = NavSystem && NavSystem->ProjectPointToNavigation(
+						PerceivedTarget->GetActorLocation(), ProjectedGoal, FVector(300.0f, 300.0f, 500.0f));
+					const bool bGoalMoved = bGoalProjects && (!bHasCorridorChaseGoal
+						|| FVector::DistSquared2D(ProjectedGoal.Location, LastCorridorChaseGoalLocation) > FMath::Square(100.0f));
+					const bool bPathEndedFarAway = bGoalProjects
+						&& ChaseController->GetMoveStatus() == EPathFollowingStatus::Idle
+						&& FVector::DistSquared2D(GetActorLocation(), ProjectedGoal.Location) > FMath::Square(100.0f)
+						&& CorridorChaseRetryElapsed >= 0.35f;
+					if (bGoalMoved || bPathEndedFarAway)
+					{
+						CorridorChaseRetryElapsed = 0.0f;
+						UpdateCorridorChaseMoveRequest();
+					}
+				}
+			}
+
 			if (CorridorMovementDebugTimeRemaining > 0.0f)
 			{
 				CorridorMovementDebugElapsed += DeltaTime;
@@ -257,10 +324,22 @@ void AMonsterBase::PrepareCorridorReveal()
 	bCorridorChaseActive = false;
 	GetWorldTimerManager().ClearAllTimersForObject(this);
 
-	if (AMonsterAIController* MonsterController = Cast<AMonsterAIController>(GetController()))
+	if (!GetController())
 	{
-		MonsterController->StopBehaviorTree();
+		SpawnDefaultController();
+	}
+
+	if (AAIController* MonsterController = Cast<AAIController>(GetController()))
+	{
+		if (AMonsterAIController* CustomController = Cast<AMonsterAIController>(MonsterController))
+		{
+			CustomController->StopBehaviorTree();
+		}
 		MonsterController->StopMovement();
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("MonsterBase '%s': sem AIController após spawn; não pode iniciar perseguição"), *GetName());
 	}
 
 	GetCharacterMovement()->DisableMovement();
@@ -271,12 +350,30 @@ void AMonsterBase::PrepareCorridorReveal()
 void AMonsterBase::StartCorridorChase(AActor* TargetActor)
 {
 	if (!IsValid(TargetActor)) return;
+	if (!GetController())
+	{
+		SpawnDefaultController();
+	}
+	AAIController* MonsterController = Cast<AAIController>(GetController());
+	if (!MonsterController)
+	{
+		UE_LOG(LogTemp, Error, TEXT("MonsterBase '%s': StartCorridorChase falhou; controller atual='%s'"),
+			*GetName(), *GetNameSafe(GetController()));
+		return;
+	}
 
 	bCorridorChaseMode = true;
 	bCorridorChaseActive = true;
 	CorridorHazardCheckElapsed = 0.15f;
 	CorridorMovementDebugElapsed = 0.0f;
 	CorridorMovementDebugTimeRemaining = 6.0f;
+	CorridorChaseRepathElapsed = 0.0f;
+	CorridorChaseRetryElapsed = 0.0f;
+	CorridorBehindRepathCooldown = 0.0f;
+	CorridorObstacleProbeElapsed = 0.0f;
+	CorridorObstacleRepathCooldown = 0.0f;
+	bCorridorObstacleWasAhead = false;
+	bHasCorridorChaseGoal = false;
 	PerceivedTarget = TargetActor;
 	LastMonsterFootstepLocation = GetActorLocation();
 	MonsterFootstepDistanceAccumulator = 0.0f;
@@ -297,32 +394,105 @@ void AMonsterBase::StartCorridorChase(AActor* TargetActor)
 		CorridorChaseMusicAudio = UGameplayStatics::SpawnSound2D(this, CorridorChaseMusic);
 	}
 
-	if (AMonsterAIController* MonsterController = Cast<AMonsterAIController>(GetController()))
+	if (AMonsterAIController* CustomController = Cast<AMonsterAIController>(MonsterController))
 	{
-		MonsterController->StopBehaviorTree();
-		MonsterController->StopMovement();
-		const EPathFollowingRequestResult::Type MoveResult =
-			MonsterController->MoveToActor(TargetActor, 70.0f, true, true, false, nullptr, true);
-		const TCHAR* MoveResultName = MoveResult == EPathFollowingRequestResult::RequestSuccessful ? TEXT("Accepted")
-			: MoveResult == EPathFollowingRequestResult::AlreadyAtGoal ? TEXT("AlreadyAtGoal") : TEXT("Failed");
+		CustomController->StopBehaviorTree();
+	}
+	MonsterController->StopMovement();
+	UpdateCorridorChaseMoveRequest();
+}
 
-		UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
-		FNavLocation ProjectedMonsterLocation;
-		FNavLocation ProjectedTargetLocation;
-		const FVector ProjectionExtent(300.0f, 300.0f, 500.0f);
-		const bool bMonsterProjectsToNav = NavSystem && NavSystem->ProjectPointToNavigation(GetActorLocation(), ProjectedMonsterLocation, ProjectionExtent);
-		const bool bTargetProjectsToNav = NavSystem && NavSystem->ProjectPointToNavigation(TargetActor->GetActorLocation(), ProjectedTargetLocation, ProjectionExtent);
-		UE_LOG(LogTemp, Warning,
-			TEXT("MonsterChaseDiag: MoveToActor=%s | monsterNav=%d (%s) | targetNav=%d (%s) | mode=%d speed=%.1f"),
-			MoveResultName,
-			bMonsterProjectsToNav ? 1 : 0, *GetActorLocation().ToString(),
-			bTargetProjectsToNav ? 1 : 0, *TargetActor->GetActorLocation().ToString(),
-			static_cast<int32>(GetCharacterMovement()->MovementMode), GetCharacterMovement()->MaxWalkSpeed);
-	}
-	else
+bool AMonsterBase::UpdateCorridorChaseMoveRequest()
+{
+	AAIController* ChaseController = Cast<AAIController>(GetController());
+	UNavigationSystemV1* NavSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+	if (!ChaseController || !IsValid(PerceivedTarget) || !NavSystem)
 	{
-		UE_LOG(LogTemp, Error, TEXT("MonsterBase '%s': sem MonsterAIController para iniciar perseguição"), *GetName());
+		UE_LOG(LogTemp, Error, TEXT("MonsterChaseDiag: MoveToLocation failed before request | controller=%s target=%s nav=%d"),
+			*GetNameSafe(ChaseController), *GetNameSafe(PerceivedTarget), NavSystem ? 1 : 0);
+		return false;
 	}
+
+	FNavLocation ProjectedMonster;
+	FNavLocation ProjectedGoal;
+	const FVector ProjectionExtent(300.0f, 300.0f, 500.0f);
+	const bool bMonsterProjects = NavSystem->ProjectPointToNavigation(GetActorLocation(), ProjectedMonster, ProjectionExtent);
+	const bool bGoalProjects = NavSystem->ProjectPointToNavigation(PerceivedTarget->GetActorLocation(), ProjectedGoal, ProjectionExtent);
+	if (!bMonsterProjects || !bGoalProjects)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("MonsterChaseDiag: MoveToLocation skipped | monsterProjected=%d at %s | goalProjected=%d at %s"),
+			bMonsterProjects ? 1 : 0, *ProjectedMonster.Location.ToString(),
+			bGoalProjects ? 1 : 0, *ProjectedGoal.Location.ToString());
+		return false;
+	}
+
+	const EPathFollowingRequestResult::Type MoveResult = ChaseController->MoveToLocation(
+		ProjectedGoal.Location, 70.0f, true, true, false, false, nullptr, false);
+	const TCHAR* MoveResultName = MoveResult == EPathFollowingRequestResult::RequestSuccessful ? TEXT("Accepted")
+		: MoveResult == EPathFollowingRequestResult::AlreadyAtGoal ? TEXT("AlreadyAtGoal") : TEXT("Failed");
+	UE_LOG(LogTemp, Warning,
+		TEXT("MonsterChaseDiag: MoveToLocation=%s | monster=%s projected=%s | target=%s projected=%s | partialPaths=off | controller=%s"),
+		MoveResultName, *GetActorLocation().ToString(), *ProjectedMonster.Location.ToString(),
+		*PerceivedTarget->GetActorLocation().ToString(), *ProjectedGoal.Location.ToString(), *GetNameSafe(ChaseController));
+
+	LastCorridorChaseGoalLocation = ProjectedGoal.Location;
+	bHasCorridorChaseGoal = true;
+	return MoveResult != EPathFollowingRequestResult::Failed;
+}
+
+void AMonsterBase::ProbeForCorridorObstacle()
+{
+	if (!GetWorld() || !GetCapsuleComponent() || !IsValid(PerceivedTarget)) return;
+
+	FVector ProbeDirection = GetVelocity().GetSafeNormal2D();
+	if (ProbeDirection.IsNearlyZero())
+	{
+		ProbeDirection = (PerceivedTarget->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
+	}
+	if (ProbeDirection.IsNearlyZero()) return;
+
+	float CapsuleRadius = 0.0f;
+	float CapsuleHalfHeight = 0.0f;
+	GetCapsuleComponent()->GetScaledCapsuleSize(CapsuleRadius, CapsuleHalfHeight);
+	// Probe slightly wider than the real capsule so we start rerouting before contact.
+	const float ProbeRadius = CapsuleRadius + 5.0f;
+	const float ProbeHalfHeight = FMath::Max(ProbeRadius, CapsuleHalfHeight);
+	const FVector ProbeStart = GetCapsuleComponent()->GetComponentLocation();
+	const FVector ProbeEnd = ProbeStart + ProbeDirection * FMath::Max(ChaseObstacleProbeDistance, 50.0f);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(MonsterChaseObstacleProbe), false);
+	QueryParams.AddIgnoredActor(this);
+	QueryParams.AddIgnoredActor(PerceivedTarget);
+	FCollisionObjectQueryParams ObjectQueryParams;
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldStatic);
+	ObjectQueryParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	FHitResult Hit;
+	const bool bBlockedAhead = GetWorld()->SweepSingleByObjectType(
+		Hit, ProbeStart, ProbeEnd, FQuat::Identity, ObjectQueryParams,
+		FCollisionShape::MakeCapsule(ProbeRadius, ProbeHalfHeight), QueryParams);
+
+	if (!bBlockedAhead)
+	{
+		bCorridorObstacleWasAhead = false;
+		return;
+	}
+
+	AAIController* ChaseController = Cast<AAIController>(GetController());
+	const bool bPathNotMakingProgress = ChaseController
+		&& (ChaseController->GetMoveStatus() == EPathFollowingStatus::Idle
+			|| (ChaseController->GetMoveStatus() == EPathFollowingStatus::Moving
+				&& GetVelocity().SizeSquared2D() < FMath::Square(5.0f)))
+		&& CorridorObstacleRepathCooldown <= 0.0f;
+	const bool bShouldRepath = !bCorridorObstacleWasAhead || bPathNotMakingProgress;
+	bCorridorObstacleWasAhead = true;
+	if (!bShouldRepath) return;
+
+	CorridorObstacleRepathCooldown = 0.25f;
+	UE_LOG(LogTemp, Warning,
+		TEXT("MonsterChaseDiag: obstacle ahead | actor=%s distance=%.1f normal=%s; recalculating full NavMesh path"),
+		*GetNameSafe(Hit.GetActor()), Hit.Distance, *Hit.ImpactNormal.ToString());
+	UpdateCorridorChaseMoveRequest();
 }
 
 void AMonsterBase::FadeOutCorridorChaseMusic(float FadeDuration)
@@ -523,7 +693,6 @@ void AMonsterBase::SetPreviousNode(AActor* NodeActor)
 
 void AMonsterBase::OnTargetPerceived(AActor* Actor, FAIStimulus Stimulus)
 {
-	if (bCorridorChaseMode) return;
     if (!Actor) return;
 
     APlayerBase* Player = Cast<APlayerBase>(Actor);
@@ -534,8 +703,24 @@ void AMonsterBase::OnTargetPerceived(AActor* Actor, FAIStimulus Stimulus)
         PerceivedTarget = Actor;
         LastPerceptionTime = GetWorld()->GetTimeSeconds();
 
-        UE_LOG(LogTemp, Log, TEXT("MonsterBase: Player perceived via %s (Strength: %.1f)"),
-            *Stimulus.Type.Name.ToString(), Stimulus.Strength);
+        if (bCorridorChaseMode)
+        {
+			const FVector ToPlayer = (Actor->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
+			const bool bPlayerIsBehind = FVector::DotProduct(GetActorForwardVector(), ToPlayer) < 0.0f;
+			UE_LOG(LogTemp, Warning,
+				TEXT("MonsterBase: player perceived during corridor chase via %s | behind=%d | strength=%.1f"),
+				*Stimulus.Type.Name.ToString(), bPlayerIsBehind ? 1 : 0, Stimulus.Strength);
+			if (bPlayerIsBehind && CorridorBehindRepathCooldown <= 0.0f)
+			{
+				CorridorBehindRepathCooldown = 0.75f;
+				bHasCorridorChaseGoal = false;
+				UpdateCorridorChaseMoveRequest();
+			}
+			return;
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("MonsterBase: Player perceived via %s (Strength: %.1f)"),
+			*Stimulus.Type.Name.ToString(), Stimulus.Strength);
 
         // State transitions based on perception
         switch (CurrentState)
@@ -560,8 +745,11 @@ void AMonsterBase::OnTargetPerceived(AActor* Actor, FAIStimulus Stimulus)
     }
     else
     {
-        // Lost perception
-        PerceivedTarget = nullptr;
+        // Keep the chase target locked even if sight is temporarily blocked or lost.
+        if (!bCorridorChaseMode)
+        {
+            PerceivedTarget = nullptr;
+        }
     }
 }
 

@@ -35,7 +35,8 @@ AMonsterAIController::AMonsterAIController()
     SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
     SightConfig->SightRadius = 1500.0f;
     SightConfig->LoseSightRadius = 1800.0f;
-    SightConfig->PeripheralVisionAngleDegrees = 90.0f;
+    // UE treats this as a half-angle; 180 degrees gives the monster a full 360-degree view.
+    SightConfig->PeripheralVisionAngleDegrees = 180.0f;
     SightConfig->SetMaxAge(5.0f);
     SightConfig->DetectionByAffiliation.bDetectEnemies = true;
     SightConfig->DetectionByAffiliation.bDetectFriendlies = false;

@@ -318,6 +318,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Corridor|Perigos|Audio")
 	TObjectPtr<USoundAttenuation> CabinetFallAttenuation;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Corridor|Encontro")
+	TObjectPtr<USoundBase> MonsterDoorHitSound;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Corridor|Encontro", meta = (ClampMin = "0.1"))
+	float MonsterDoorHitSpacing = 0.55f;
+
 public:
 	// Monster Reaction Delegates
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerUsedSecurityCamera, AActor*, CameraActor);
@@ -439,6 +445,10 @@ protected:
 	float PursuitDoorCloseElapsed = 0.0f;
 	float PursuitDoorCloseDuration = 0.7f;
 	bool bPursuitDoorClosing = false;
+	bool bMonsterDoorHitsPending = false;
+	int32 MonsterDoorHitsRemaining = 0;
+	FVector MonsterDoorHitLocation = FVector::ZeroVector;
+	FTimerHandle MonsterDoorHitTimerHandle;
 
 	FVector FocusStartLocation = FVector::ZeroVector;
 	FVector FocusTargetLocation = FVector::ZeroVector;
@@ -518,6 +528,8 @@ protected:
 	void PauseMovementAudio();
 	void UpdateCorridorHazards(float DeltaTime);
 	void UpdatePursuitDoor(float DeltaTime);
+	void TryStartMonsterDoorHits();
+	void PlayMonsterDoorHit();
 	void SetCorridorCrouched(bool bCrouched);
 	void UpdateCorridorReticle();
 	bool IsCorridorInteractable(AActor* Actor) const;

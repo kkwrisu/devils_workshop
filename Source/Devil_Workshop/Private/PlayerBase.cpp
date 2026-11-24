@@ -43,6 +43,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "UObject/ConstructorHelpers.h"
 #include "Monsters/MonsterTypes.h"
 
 static UCurveFloat* MakeDefaultCurve(UObject* Outer, float EndTime, float EndValue, bool bSmooth)
@@ -67,6 +68,12 @@ static UCurveFloat* MakeDefaultCurve(UObject* Outer, float EndTime, float EndVal
 APlayerBase::APlayerBase()
 {
 	PrimaryActorTick.bCanEverTick = true;
+	static ConstructorHelpers::FObjectFinder<USoundBase> MonsterDoorHitSoundAsset(
+		TEXT("/Game/Audio/universfield-intense-door-knocking-637240.universfield-intense-door-knocking-637240"));
+	if (MonsterDoorHitSoundAsset.Succeeded())
+	{
+		MonsterDoorHitSound = MonsterDoorHitSoundAsset.Object;
+	}
 
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
@@ -896,6 +903,10 @@ void APlayerBase::SetCorridorMode(bool bEnable)
 	}
 	SetCorridorCrouched(false);
 	bIsInCorridor = bEnable;
+	if (!bEnable)
+	{
+		TryStartMonsterDoorHits();
+	}
 	CorridorFootstepNoiseTimer = 0.0f;
 	CorridorVelocity = FVector::ZeroVector;
 	CorridorTargetYawOffset = static_cast<float>(LookYawOffset);
@@ -1330,12 +1341,14 @@ void APlayerBase::ClosePursuitDoor(AActor* DoorActor, USoundBase* DoorSound)
 	PursuitDoorToClose = DoorActor;
 	PursuitDoorStartLocation = DoorActor->GetActorLocation();
 	PursuitDoorTargetLocation = PursuitDoorStartLocation;
-	PursuitDoorTargetLocation.X = 643.0f;
+	PursuitDoorTargetLocation.X = 645.0f;
+	PursuitDoorTargetLocation.Y = -1030.0f;
 	PursuitDoorStartRotation = DoorActor->GetActorRotation();
 	PursuitDoorTargetRotation = PursuitDoorStartRotation;
 	PursuitDoorTargetRotation.Yaw = -40.0f;
 	PursuitDoorCloseElapsed = 0.0f;
 	bPursuitDoorClosing = true;
+	bMonsterDoorHitsPending = true;
 	PursuitDoorCloseDuration = 0.7f;
 	if (DoorSound)
 	{
@@ -1343,8 +1356,8 @@ void APlayerBase::ClosePursuitDoor(AActor* DoorActor, USoundBase* DoorSound)
 	}
 	ReportGameplayNoise(FName(TEXT("Noise.Event.Door.Close")), 1.0f, 2600.0f);
 	UE_LOG(LogTemp, Warning,
-		TEXT("PlayerBase: porta_corredor fechando durante perseguicao | Yaw %.1f -> -40.0 | X %.1f -> 643.0"),
-		PursuitDoorStartRotation.Yaw, PursuitDoorStartLocation.X);
+		TEXT("PlayerBase: porta_corredor fechando durante perseguicao | Location (%.1f, %.1f) -> (645.0, -1030.0) | Yaw %.1f -> -40.0"),
+		PursuitDoorStartLocation.X, PursuitDoorStartLocation.Y, PursuitDoorStartRotation.Yaw);
 }
 
 void APlayerBase::UpdatePursuitDoor(float DeltaTime)
@@ -1368,7 +1381,41 @@ void APlayerBase::UpdatePursuitDoor(float DeltaTime)
 		DoorActor->SetActorLocation(PursuitDoorTargetLocation);
 		DoorActor->SetActorRotation(PursuitDoorTargetRotation);
 		bPursuitDoorClosing = false;
+		MonsterDoorHitLocation = DoorActor->GetActorLocation();
 		PursuitDoorToClose.Reset();
+		TryStartMonsterDoorHits();
+	}
+}
+
+void APlayerBase::TryStartMonsterDoorHits()
+{
+	// Wait for both the return to the workshop and the door-closing animation.
+	if (!bMonsterDoorHitsPending || bIsInCorridor || bPursuitDoorClosing || !MonsterDoorHitSound)
+	{
+		return;
+	}
+
+	bMonsterDoorHitsPending = false;
+	MonsterDoorHitsRemaining = 2;
+	GetWorldTimerManager().ClearTimer(MonsterDoorHitTimerHandle);
+	GetWorldTimerManager().SetTimer(
+		MonsterDoorHitTimerHandle, this, &APlayerBase::PlayMonsterDoorHit, 0.2f, false);
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: door closed and player returned; monster will hit the door twice"));
+}
+
+void APlayerBase::PlayMonsterDoorHit()
+{
+	if (MonsterDoorHitsRemaining <= 0 || !MonsterDoorHitSound) return;
+
+	UGameplayStatics::PlaySoundAtLocation(this, MonsterDoorHitSound, MonsterDoorHitLocation, 0.9f);
+	--MonsterDoorHitsRemaining;
+	UE_LOG(LogTemp, Log, TEXT("PlayerBase: monster hit door | hits remaining=%d"), MonsterDoorHitsRemaining);
+
+	if (MonsterDoorHitsRemaining > 0)
+	{
+		GetWorldTimerManager().SetTimer(
+			MonsterDoorHitTimerHandle, this, &APlayerBase::PlayMonsterDoorHit,
+			FMath::Max(MonsterDoorHitSpacing, 0.1f), false);
 	}
 }
 
