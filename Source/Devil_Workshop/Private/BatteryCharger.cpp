@@ -72,7 +72,8 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 
 	if (InsertSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, InsertSound, GetActorLocation());
+		UGameplayStatics::PlaySoundAtLocation(
+			this, InsertSound, GetActorLocation(), 1.0f, 1.0f, 0.0f, AudioAttenuation);
 	}
 
 	if (ChargingLoopSound)
@@ -80,17 +81,9 @@ bool ABatteryCharger::UseItem_Implementation(const FInventoryItem& Item, AActor*
 		LoopAudio = UGameplayStatics::SpawnSoundAttached(
 			ChargingLoopSound, GetRootComponent(), NAME_None, FVector::ZeroVector,
 			EAttachLocation::KeepRelativeOffset, true, 1.0f, 1.0f, 0.0f,
-			nullptr, nullptr, false);
+			AudioAttenuation, nullptr, false);
 		if (LoopAudio)
 		{
-			FSoundAttenuationSettings ChargingAttenuation;
-			ChargingAttenuation.bAttenuate = true;
-			ChargingAttenuation.bSpatialize = true;
-			ChargingAttenuation.AttenuationShape = EAttenuationShape::Sphere;
-			ChargingAttenuation.AttenuationShapeExtents = FVector(200.0f, 0.0f, 0.0f);
-			ChargingAttenuation.FalloffDistance = 1800.0f;
-			LoopAudio->SetAttenuationOverrides(ChargingAttenuation);
-			LoopAudio->SetOverrideAttenuation(true);
 			LoopAudio->bAllowSpatialization = true;
 			// Loop even when the assigned asset is a one-shot Sound Wave.
 			LoopAudio->OnAudioFinishedNative.AddUObject(this, &ABatteryCharger::HandleChargingAudioFinished);
@@ -199,7 +192,8 @@ void ABatteryCharger::SpawnCorridorMonster(APlayerBase* Player)
 	SpawnedMonster->PrepareCorridorReveal();
 	if (MonsterArrivalSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, MonsterArrivalSound, SpawnedMonster->GetActorLocation());
+		UGameplayStatics::PlaySoundAtLocation(
+			this, MonsterArrivalSound, SpawnedMonster->GetActorLocation(), 1.0f, 1.0f, 0.0f, AudioAttenuation);
 	}
 	Player->StartMonsterReveal(SpawnedMonster);
 	UE_LOG(LogTemp, Warning, TEXT("BatteryCharger '%s': monster '%s' spawned after charged battery pickup"), *GetName(), *SpawnedMonster->GetName());
@@ -249,7 +243,8 @@ void ABatteryCharger::FinishCharging()
 
 	if (ChargeCompleteSound)
 	{
-		UGameplayStatics::PlaySoundAtLocation(this, ChargeCompleteSound, GetActorLocation());
+		UGameplayStatics::PlaySoundAtLocation(
+			this, ChargeCompleteSound, GetActorLocation(), 1.0f, 1.0f, 0.0f, AudioAttenuation);
 	}
 	ReportHearingNoise(FName("BatteryCharged"), ChargeCompleteNoiseLoudness, ChargeCompleteNoiseRange);
 

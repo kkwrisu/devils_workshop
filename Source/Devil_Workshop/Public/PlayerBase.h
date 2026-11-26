@@ -83,6 +83,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Monsters|Noise")
 	void ReportGameplayNoise(FName NoiseTagName, float Loudness = 1.0f, float HearRange = 2000.0f);
 
+	UFUNCTION(BlueprintPure, Category = "Workshop|Events")
+	bool CanRunWorkshopAmbientEvents() const;
+
 	void PlayPickupSound(USoundBase* SoundOverride, const FVector& Location);
 
 	bool IsClickHeld() const { return bClickHeld; }
@@ -127,6 +130,7 @@ public:
 
 	UPROPERTY(BlueprintReadWrite, Category = "Estado")
 	TArray<FTransform> PositionHistory;
+	TArray<TWeakObjectPtr<AActor>> PositionAreaHistory;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Estado")
 	double LookYawOffset = 0.0;
@@ -318,6 +322,15 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Corridor|Perigos|Audio")
 	TObjectPtr<USoundAttenuation> CabinetFallAttenuation;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Cabinet Door")
+	TObjectPtr<USoundBase> CabinetDoorOpenSound;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Cabinet Door")
+	TObjectPtr<USoundBase> CabinetDoorCloseSound;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Audio|Cabinet Door")
+	TObjectPtr<USoundAttenuation> CabinetDoorAttenuation;
+
 	UPROPERTY(EditDefaultsOnly, Category = "Audio|Corridor|Encontro")
 	TObjectPtr<USoundBase> MonsterDoorHitSound;
 
@@ -435,6 +448,13 @@ protected:
 	float CorridorStandCapsuleHalfHeight = 65.0f;
 	float CorridorStandCapsuleRadius = 26.0f;
 	TArray<FCorridorCabinetFallState> CorridorCabinets;
+	TWeakObjectPtr<AActor> CabinetDoorActor;
+	FTransform CabinetDoorClosedTransform = FTransform::Identity;
+	UPROPERTY(EditAnywhere, Category = "Cabinet Door")
+	FVector CabinetDoorOpenLocationOffset = FVector(-33.0f, -76.5f, 0.0f);
+	UPROPERTY(EditAnywhere, Category = "Cabinet Door")
+	float CabinetDoorOpenYawOffset = 50.0f;
+	bool bCabinetDoorOpen = false;
 	TWeakObjectPtr<AMonsterBase> PendingCorridorRevealMonster;
 	TWeakObjectPtr<AActor> PursuitDoorToClose;
 	FVector PursuitDoorPivot = FVector::ZeroVector;
@@ -528,6 +548,7 @@ protected:
 	void PauseMovementAudio();
 	void UpdateCorridorHazards(float DeltaTime);
 	void UpdatePursuitDoor(float DeltaTime);
+	void ToggleCabinetDoor(AActor* DoorActor);
 	void TryStartMonsterDoorHits();
 	void PlayMonsterDoorHit();
 	void SetCorridorCrouched(bool bCrouched);
@@ -540,6 +561,7 @@ protected:
 	void EnforceMinimumQuality();
 
 	void PlaceInspectedObject(const FVector& CenterWorld, double ScaleRatio);
+	void UpdateInspectionLightPosition(const FVector& ObjectCenter);
 	void UpdateInspectionRotation();
 	void UpdateInspectionZoom(float DeltaTime);
 	bool IsMouseNearScreenEdge();

@@ -8,6 +8,7 @@
 class UStaticMeshComponent;
 class UAudioComponent;
 class USoundBase;
+class USoundAttenuation;
 class UItemData;
 class APlayerBase;
 class AMonsterBase;
@@ -93,6 +94,10 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Carregador|Audio")
 	TObjectPtr<USoundBase> ChargeCompleteSound;
+
+	// Asset opcional de atenuacao espacial aplicado aos sons emitidos pelo carregador.
+	UPROPERTY(EditAnywhere, Category = "Carregador|Audio")
+	TObjectPtr<USoundAttenuation> AudioAttenuation;
 
 	UPROPERTY(EditAnywhere, Category = "Carregador|Encontro|Audio")
 	TObjectPtr<USoundBase> MonsterArrivalSound;

@@ -65,6 +65,22 @@ static UCurveFloat* MakeDefaultCurve(UObject* Outer, float EndTime, float EndVal
 	return NewCurve;
 }
 
+static bool SharesWorkshopInteractionArea(const AActor* TargetActor, const AActor* NavigationArea)
+{
+	if (!IsValid(TargetActor) || !IsValid(NavigationArea)) return false;
+
+	for (const FName& TargetTag : TargetActor->Tags)
+	{
+		if (TargetTag.ToString().StartsWith(TEXT("ViewArea_"), ESearchCase::IgnoreCase)
+			&& NavigationArea->Tags.Contains(TargetTag))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 APlayerBase::APlayerBase()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -155,6 +171,25 @@ void APlayerBase::BeginPlay()
 	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
 	{
 		const FString ActorName = It->GetActorNameOrLabel();
+		if (!CabinetDoorActor.IsValid()
+			&& (ActorName.Contains(TEXT("SM_porta_armario_3"), ESearchCase::IgnoreCase)
+				|| It->ActorHasTag(FName(TEXT("CabinetDoor")))))
+		{
+			CabinetDoorActor = *It;
+			CabinetDoorClosedTransform = It->GetActorTransform();
+			TArray<UPrimitiveComponent*> DoorComponents;
+			It->GetComponents<UPrimitiveComponent>(DoorComponents);
+			for (UPrimitiveComponent* Component : DoorComponents)
+			{
+				if (Component)
+				{
+					Component->SetMobility(EComponentMobility::Movable);
+				}
+			}
+			UE_LOG(LogTemp, Warning, TEXT("PlayerBase: porta de armario encontrada: '%s' | fechada em %s"),
+				*ActorName, *CabinetDoorClosedTransform.ToHumanReadableString());
+		}
+
 		if (ActorName.Contains(TEXT("Armario_Cai"), ESearchCase::IgnoreCase)
 			|| It->ActorHasTag(FName(TEXT("CabinetFall"))))
 		{
@@ -173,6 +208,19 @@ void APlayerBase::BeginPlay()
 		}
 	}
 	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: encontrados %d armarios de queda (Armario_Cai / Armario_Cai_2 ou tag CabinetFall)"), CorridorCabinets.Num());
+
+	TArray<AActor*> WorkshopStartAreas;
+	UGameplayStatics::GetAllActorsWithTag(this, FName(TEXT("WorkshopStartPosition")), WorkshopStartAreas);
+	if (!WorkshopStartAreas.IsEmpty())
+	{
+		CurrentAreaActor = WorkshopStartAreas[0];
+		UE_LOG(LogTemp, Warning, TEXT("PlayerBase: area inicial definida pelo marcador '%s'"),
+			*GetNameSafe(CurrentAreaActor));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("PlayerBase: nenhum marcador WorkshopStartPosition encontrado; interacoes da oficina nao terao area inicial"));
+	}
 
 	EnforceMinimumQuality();
 
@@ -408,6 +456,7 @@ bool APlayerBase::IsMouseNearScreenEdge()
 void APlayerBase::OnClick()
 {
 	if (bInventoryOpen || bTaskListOpen) return;
+	if (IsTransitioning) return;
 
 	bClickHeld = true;
 
@@ -466,6 +515,8 @@ void APlayerBase::OnClick()
 	Params.AddIgnoredActor(this);
 
 	AActor* FallbackClickable = nullptr;
+	bool bSeekingNavigationMarker = false;
+	AActor* ActiveWorkshopArea = !bIsInCorridor ? CurrentAreaActor.Get() : nullptr;
 
 	for (int32 i = 0; i < 8; ++i)
 	{
@@ -480,6 +531,56 @@ void APlayerBase::OnClick()
 		if (!HitActor) break;
 
 		UE_LOG(LogTemp, Warning, TEXT("Click: trace %d acertou '%s'"), i, *HitActor->GetName());
+
+		const bool bIsWorkshopInteractionTarget = HitActor == CabinetDoorActor.Get()
+			|| Cast<AItemPickup>(HitActor)
+			|| Cast<ABatteryCharger>(HitActor)
+			|| HitActor->GetClass()->ImplementsInterface(UItemUseTarget::StaticClass())
+			|| HitActor->ActorHasTag(TEXT("CorridorDoor"))
+			|| HitActor->ActorHasTag(TEXT("Inspectable"))
+			|| HitActor->ActorHasTag(TEXT("CameraFocus"))
+			|| HitActor->ActorHasTag(TEXT("Door"));
+
+		// Na oficina, alvo e marcador atual precisam compartilhar uma tag ViewArea_*.
+		// Essa associação explícita evita deduzir disponibilidade por distância ou volume.
+		if (!bIsInCorridor && bIsWorkshopInteractionTarget
+			&& !SharesWorkshopInteractionArea(HitActor, ActiveWorkshopArea))
+		{
+			UE_LOG(LogTemp, Log, TEXT("Click: ignorando '%s'; sem ViewArea correspondente a '%s'"),
+				*HitActor->GetName(), *GetNameSafe(ActiveWorkshopArea));
+			Params.AddIgnoredActor(HitActor);
+			bSeekingNavigationMarker = true;
+			continue;
+		}
+
+		// O trace só reconhece a folha da porta; cliques nos itens dentro do armário
+		// continuam chegando aos próprios atores de pickup.
+		if (HitActor == CabinetDoorActor.Get())
+		{
+			// Se a folha aberta interceptar o raio antes do item, tenta primeiro o
+			// mesmo raio ignorando somente a porta. A colisão dos demais objetos continua valendo.
+			if (bCabinetDoorOpen)
+			{
+				FCollisionQueryParams ItemParams(SCENE_QUERY_STAT(CabinetItemClickTrace), true);
+				ItemParams.AddIgnoredActor(this);
+				ItemParams.AddIgnoredActor(HitActor);
+				FHitResult ItemHit;
+				if (GetWorld()->LineTraceSingleByChannel(ItemHit, WorldOrigin, TraceEnd, ECC_Visibility, ItemParams))
+				{
+					if (AItemPickup* Pickup = Cast<AItemPickup>(ItemHit.GetActor()))
+					{
+						if (Pickup->TryPickup(this)) return;
+					}
+					if (ABatteryCharger* Charger = Cast<ABatteryCharger>(ItemHit.GetActor()))
+					{
+						if (Charger->TryCollect(this)) return;
+					}
+				}
+			}
+
+			ToggleCabinetDoor(HitActor);
+			return;
+		}
 
 		if (HitActor->ActorHasTag(TEXT("CorridorDoor")))
 		{
@@ -557,12 +658,21 @@ void APlayerBase::OnClick()
 			return;
 		}
 
+		// O alvo interativo distante pode estar na frente da bancada (ou de um
+		// bloqueador decorativo). Depois de descartá-lo, continua procurando a caixa clicável.
+		if (bSeekingNavigationMarker)
+		{
+			Params.AddIgnoredActor(HitActor);
+			continue;
+		}
+
 		break;
 	}
 
 	if (FallbackClickable && FallbackClickable != CurrentAreaActor)
 	{
 		ReportGameplayNoise(FName(TEXT("Noise.Event.Footstep.Walk")), 0.7f, 2000.0f);
+		PositionAreaHistory.Add(CurrentAreaActor);
 		CurrentAreaActor = FallbackClickable;
 		PositionHistory.Add(GetActorTransform());
 		PositionLookHistory.Add(FRotator(LookPitchOffset, LookYawOffset, 0.0));
@@ -582,6 +692,13 @@ void APlayerBase::ReportGameplayNoise(FName NoiseTagName, float Loudness, float 
 	NoiseEvent.Instigator = this;
 	NoiseEvent.Timestamp = GetWorld()->GetTimeSeconds();
 	OnPlayerMadeNoise.Broadcast(NoiseEvent);
+}
+
+bool APlayerBase::CanRunWorkshopAmbientEvents() const
+{
+	// Event pacing follows elapsed gameplay time, including UI, transitions, and corridor exploration.
+	// Stop scheduling only once the prologue/day has been completed.
+	return !bPrologueCompletionStarted;
 }
 
 void APlayerBase::PlayPickupSound(USoundBase* SoundOverride, const FVector& Location)
@@ -984,7 +1101,8 @@ bool APlayerBase::TryUseCorridorDoor(AActor* DoorActor)
 	}
 	PositionHistory.Reset();
 	PositionLookHistory.Reset();
-	CurrentAreaActor = nullptr;
+	PositionAreaHistory.Reset();
+	CurrentAreaActor = bEnteringCorridor ? nullptr : Destinations[0];
 	bPendingCorridorMode = bEnteringCorridor;
 	bChangeCorridorModeAfterMove = true;
 	if (!bEnteringCorridor && CorridorReticleWidget)
@@ -1160,7 +1278,16 @@ void APlayerBase::OnGoBack()
 	const FRotator LastLookOffset = PositionLookHistory.IsEmpty()
 		? FRotator::ZeroRotator
 		: PositionLookHistory.Pop();
-	CurrentAreaActor = nullptr;
+	if (!PositionAreaHistory.IsEmpty())
+	{
+		CurrentAreaActor = PositionAreaHistory.Pop().Get();
+	}
+	else
+	{
+		TArray<AActor*> WorkshopStartAreas;
+		UGameplayStatics::GetAllActorsWithTag(this, FName(TEXT("WorkshopStartPosition")), WorkshopStartAreas);
+		CurrentAreaActor = WorkshopStartAreas.IsEmpty() ? nullptr : WorkshopStartAreas[0];
+	}
 	MoveToPosition(Last);
 	PendingLookOffset = LastLookOffset;
 	bRestoreLookOffsetOnMoveFinished = true;
@@ -1387,6 +1514,34 @@ void APlayerBase::UpdatePursuitDoor(float DeltaTime)
 	}
 }
 
+void APlayerBase::ToggleCabinetDoor(AActor* DoorActor)
+{
+	if (!IsValid(DoorActor) || DoorActor != CabinetDoorActor.Get()) return;
+
+	// A pose fechada vem do nível no BeginPlay; os offsets configuráveis definem a pose aberta.
+	FTransform OpenTransform = CabinetDoorClosedTransform;
+	OpenTransform.AddToTranslation(CabinetDoorOpenLocationOffset);
+	FRotator OpenRotation = CabinetDoorClosedTransform.Rotator();
+	OpenRotation.Yaw += CabinetDoorOpenYawOffset;
+	OpenTransform.SetRotation(OpenRotation.Quaternion());
+
+	bCabinetDoorOpen = !bCabinetDoorOpen;
+	DoorActor->SetActorTransform(
+		bCabinetDoorOpen ? OpenTransform : CabinetDoorClosedTransform,
+		false,
+		nullptr,
+	ETeleportType::TeleportPhysics);
+
+	USoundBase* DoorSound = bCabinetDoorOpen ? CabinetDoorOpenSound.Get() : CabinetDoorCloseSound.Get();
+	if (DoorSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(
+			this, DoorSound, DoorActor->GetActorLocation(), 1.0f, 1.0f, 0.0f, CabinetDoorAttenuation);
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("PlayerBase: armario %s instantaneamente"), bCabinetDoorOpen ? TEXT("aberto") : TEXT("fechado"));
+}
+
 void APlayerBase::TryStartMonsterDoorHits()
 {
 	// Wait for both the return to the workshop and the door-closing animation.
@@ -1583,6 +1738,11 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 	InspectionZoomTarget = InspectionDistance;
 
 	InspectedObject = TargetObject;
+	if (USceneComponent* InspectedRoot = TargetObject->GetRootComponent())
+	{
+		// A luz passa a acompanhar o ator inspecionado diretamente durante toda a transição.
+		InspectionLight->AttachToComponent(InspectedRoot, FAttachmentTransformRules::KeepWorldTransform);
+	}
 	isInspecting = true;
 	InspectionLight->SetVisibility(true);
 	IsTransitioning = true;
@@ -1631,6 +1791,7 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 
 	InspectStartCenter = BoundsOrigin;
 	InspectLocalCenterOffset = TargetObject->GetActorQuat().UnrotateVector(BoundsOrigin - InspectStartLocation);
+	UpdateInspectionLightPosition(InspectStartCenter);
 
 	InspectScaleRatio = 1.0;
 	if (bAutoFitInspectedObject)
@@ -1667,7 +1828,9 @@ void APlayerBase::StartInspection(AActor* TargetObject)
 
 		const FLightingChannels PreviousChannels = Primitive->LightingChannels;
 		InspectedLightingChannelStates.Add(Primitive, PreviousChannels);
-		Primitive->SetLightingChannels(PreviousChannels.bChannel0, true, PreviousChannels.bChannel2);
+		// Durante a inspeção, só a luz de preenchimento do jogador deve iluminar o objeto.
+		// Isso impede a contribuição da luz fixa da bancada de desaparecer no meio da transição.
+		Primitive->SetLightingChannels(false, true, false);
 	}
 
 	InspectTimeline.PlayFromStart();
@@ -1683,6 +1846,8 @@ void APlayerBase::ExitInspection()
 	{
 		isInspecting = false;
 		InspectionLight->SetVisibility(false);
+		InspectionLight->AttachToComponent(InspectionAnchor, FAttachmentTransformRules::KeepRelativeTransform);
+		InspectionLight->SetRelativeLocation(FVector(-50.0f, 0.0f, 25.0f));
 		RestoreInspectionLightingChannels();
 		ClearInspectionBlur();
 		return;
@@ -1716,6 +1881,22 @@ void APlayerBase::PlaceInspectedObject(const FVector& CenterWorld, double ScaleR
 	InspectedObject->SetActorLocation(CenterWorld - Q.RotateVector(InspectLocalCenterOffset * ScaleRatio));
 }
 
+void APlayerBase::UpdateInspectionLightPosition(const FVector& ObjectCenter)
+{
+	if (!InspectionLight || !Camera || !InspectedObject) return;
+
+	FVector TowardCamera = Camera->GetComponentLocation() - ObjectCenter;
+	if (!TowardCamera.Normalize())
+	{
+		TowardCamera = -Camera->GetForwardVector();
+	}
+
+	// Keep the private inspection light close to the inspected mesh throughout
+	// the in/out transition, so it does not lose the object while it leaves the desk light.
+	const FVector LightLocation = ObjectCenter + TowardCamera * 90.0f + Camera->GetUpVector() * 20.0f;
+	InspectionLight->SetWorldLocation(LightLocation);
+}
+
 void APlayerBase::UpdateInspectionZoom(float DeltaTime)
 {
 	if (!InspectedObject || IsTransitioning) return;
@@ -1726,6 +1907,7 @@ void APlayerBase::UpdateInspectionZoom(float DeltaTime)
 	const double NewDistance = FMath::FInterpTo(Current, InspectionZoomTarget, static_cast<double>(DeltaTime), InspectionZoomSpeed);
 	InspectionAnchor->SetRelativeLocation(FVector(NewDistance, 0.0, 0.0));
 	PlaceInspectedObject(InspectionAnchor->GetComponentLocation(), InspectScaleRatio);
+	UpdateInspectionLightPosition(InspectionAnchor->GetComponentLocation());
 
 	if (bBlurBackground)
 	{
@@ -1765,6 +1947,7 @@ void APlayerBase::UpdateInspectionRotation()
 
 		InspectedObject->SetActorRotation(PitchQuat * YawQuat * InspectedObject->GetActorQuat());
 		PlaceInspectedObject(InspectionAnchor->GetComponentLocation(), InspectScaleRatio);
+		UpdateInspectionLightPosition(InspectionAnchor->GetComponentLocation());
 	}
 	else
 	{
@@ -1788,6 +1971,7 @@ void APlayerBase::OnInspectUpdate(float Alpha)
 	const double Ratio = FMath::Lerp(1.0, InspectScaleRatio, static_cast<double>(Alpha));
 	const FVector Center = FMath::Lerp(InspectStartCenter, InspectionAnchor->GetComponentLocation(), Alpha);
 	PlaceInspectedObject(Center, Ratio);
+	UpdateInspectionLightPosition(Center);
 
 	UpdateInspectionBlur(Alpha);
 }
@@ -1818,9 +2002,11 @@ void APlayerBase::OnInspectFinished()
 		InspectedShadowStates.Reset();
 		RestoreInspectionLightingChannels();
 
+		InspectionLight->SetVisibility(false);
+		InspectionLight->AttachToComponent(InspectionAnchor, FAttachmentTransformRules::KeepRelativeTransform);
+		InspectionLight->SetRelativeLocation(FVector(-50.0f, 0.0f, 25.0f));
 		InspectedObject = nullptr;
 		isInspecting = false;
-		InspectionLight->SetVisibility(false);
 		bInspectDragging = false;
 
 		InspectionAnchor->SetRelativeLocation(FVector(InspectionDistance, 0.0, 0.0));
